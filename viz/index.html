@@ -1,0 +1,314 @@
+<title>Heatnet — варианты трассировки тепловой сети</title>
+<style>
+  :root {
+    --paper: #EEF1F0;
+    --panel: #F7F9F8;
+    --ink: #1E2A28;
+    --muted: #5D6B68;
+    --line: #D3DAD8;
+    --building: #D8DDDB;
+    --building-stroke: #AEB8B5;
+    --water: #AFCEDD;
+    --rail: #99A3A7;
+    --existing: #A84C43;
+    --accent: #0E7A6E;
+    --accent-soft: rgba(14, 122, 110, 0.12);
+    --oks: #2C5AA0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #131C1A;
+      --panel: #1A2523;
+      --ink: #E5ECEA;
+      --muted: #93A5A1;
+      --line: #2C3A37;
+      --building: #243230;
+      --building-stroke: #3B4A46;
+      --water: #1F3947;
+      --rail: #4A5559;
+      --existing: #C96B5F;
+      --accent: #35B5A4;
+      --accent-soft: rgba(53, 181, 164, 0.16);
+      --oks: #6E9BD8;
+    }
+  }
+  :root[data-theme="light"] {
+    --paper: #EEF1F0; --panel: #F7F9F8; --ink: #1E2A28; --muted: #5D6B68;
+    --line: #D3DAD8; --building: #D8DDDB; --building-stroke: #AEB8B5;
+    --water: #AFCEDD; --rail: #99A3A7; --existing: #A84C43;
+    --accent: #0E7A6E; --accent-soft: rgba(14,122,110,0.12); --oks: #2C5AA0;
+  }
+  :root[data-theme="dark"] {
+    --paper: #131C1A; --panel: #1A2523; --ink: #E5ECEA; --muted: #93A5A1;
+    --line: #2C3A37; --building: #243230; --building-stroke: #3B4A46;
+    --water: #1F3947; --rail: #4A5559; --existing: #C96B5F;
+    --accent: #35B5A4; --accent-soft: rgba(53,181,164,0.16); --oks: #6E9BD8;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column; height: 100vh;
+  }
+  header {
+    padding: 12px 20px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+  }
+  header h1 {
+    margin: 0; font: 600 17px/1.2 "Cascadia Mono", Consolas, monospace;
+    letter-spacing: 0.02em;
+  }
+  header .sub { color: var(--muted); font-size: 13px; }
+  main { flex: 1; display: flex; min-height: 0; }
+  #map-wrap { flex: 1; position: relative; min-width: 0; }
+  #map { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+  #map.dragging { cursor: grabbing; }
+  aside {
+    width: 320px; border-left: 1px solid var(--line); background: var(--panel);
+    padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px;
+  }
+  .label {
+    font: 600 11px/1 "Cascadia Mono", Consolas, monospace;
+    letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted);
+  }
+  .variants { display: flex; flex-direction: column; gap: 8px; }
+  .variant {
+    border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px;
+    background: none; text-align: left; color: inherit; cursor: pointer;
+    font: inherit; display: block; width: 100%;
+  }
+  .variant:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .variant.active { border-color: var(--accent); background: var(--accent-soft); }
+  .variant .name { font-weight: 600; }
+  .variant .stats {
+    display: flex; gap: 12px; margin-top: 4px; color: var(--muted); font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  .variant .rank {
+    float: right; font: 600 11px/1.6 "Cascadia Mono", Consolas, monospace;
+    color: var(--accent);
+  }
+  .summary { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+  .summary div { display: flex; flex-direction: column; }
+  .summary .v {
+    font: 600 16px/1.3 "Cascadia Mono", Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+  .summary .k { font-size: 11px; color: var(--muted); }
+  .legend { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; }
+  .legend .row { display: flex; align-items: center; gap: 8px; }
+  .legend svg { flex: none; }
+  #seg-info {
+    border-top: 1px solid var(--line); padding-top: 12px; min-height: 76px;
+    font-size: 13px;
+  }
+  #seg-info .hint { color: var(--muted); }
+  #seg-info table { border-collapse: collapse; }
+  #seg-info td { padding: 1px 10px 1px 0; font-variant-numeric: tabular-nums; }
+  #seg-info td:first-child { color: var(--muted); }
+  footer {
+    padding: 6px 20px; border-top: 1px solid var(--line); color: var(--muted);
+    font-size: 11.5px; display: flex; justify-content: space-between; gap: 12px;
+  }
+  @media (max-width: 760px) {
+    main { flex-direction: column; }
+    aside { width: 100%; border-left: none; border-top: 1px solid var(--line); }
+    #map-wrap { min-height: 55vh; }
+  }
+</style>
+
+<header>
+  <h1>HEATNET / трассировка</h1>
+  <span class="sub">Подключение 17 ОКС к сети ТЭЦ «ЗИЛ» — конкурсный набор ЛЦТ-2026, расчёт сервиса без ручной правки</span>
+</header>
+
+<main>
+  <div id="map-wrap"><svg id="map" aria-label="Карта вариантов трассировки"></svg></div>
+  <aside>
+    <div>
+      <div class="label">Варианты</div>
+      <div class="variants" id="variants"></div>
+    </div>
+    <div>
+      <div class="label">Показатели варианта</div>
+      <div style="height:8px"></div>
+      <div class="summary" id="summary"></div>
+    </div>
+    <div>
+      <div class="label">Легенда</div>
+      <div style="height:8px"></div>
+      <div class="legend" id="legend"></div>
+    </div>
+    <div id="seg-info"><span class="hint">Наведите курсор на участок новой сети — покажу ДУ, расход и стоимость.</span></div>
+  </aside>
+</main>
+
+<footer>
+  <span>Колёсико — масштаб, перетаскивание — панорама. Толщина линии пропорциональна ДУ.</span>
+  <span>EPSG:32637 → локальные метры</span>
+</footer>
+
+<script src="viz_data.js"></script>
+<script>
+(function () {
+  const svg = document.getElementById('map');
+  const NS = 'http://www.w3.org/2000/svg';
+  const fmtRub = n => new Intl.NumberFormat('ru-RU').format(Math.round(n)) + ' ₽';
+  const fmtM = n => new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 }).format(n) + ' м';
+
+  let vb = { x: -40, y: -40, w: DATA.w + 80, h: DATA.h + 80 };
+  const fitAspect = () => {
+    const r = svg.clientWidth / Math.max(1, svg.clientHeight);
+    if (vb.w / vb.h < r) { const w = vb.h * r; vb.x -= (w - vb.w) / 2; vb.w = w; }
+    else { const h = vb.w / r; vb.y -= (h - vb.h) / 2; vb.h = h; }
+  };
+  const applyVb = () => svg.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+
+  function el(name, attrs, parent) {
+    const e = document.createElementNS(NS, name);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    (parent || svg).appendChild(e);
+    return e;
+  }
+  const pts = a => a.map(p => p.join(',')).join(' ');
+  const duWidth = du => 1.5 + du / 90;
+
+  // --- статичная подложка ---
+  const base = el('g', {});
+  DATA.water.forEach(d => el('path', { d, fill: 'var(--water)', stroke: 'none' }, base));
+  DATA.railway.forEach(d => el('path', {
+    d, fill: 'none', stroke: 'var(--rail)', 'stroke-width': 3, 'stroke-dasharray': '10 6'
+  }, base));
+  DATA.buildings.forEach(d => el('path', {
+    d, fill: 'var(--building)', stroke: 'var(--building-stroke)', 'stroke-width': 0.8
+  }, base));
+  DATA.pipes.forEach(p => el('polyline', {
+    points: pts(p.pts), fill: 'none', stroke: 'var(--existing)',
+    'stroke-width': duWidth(p.du), 'stroke-dasharray': '12 5', 'stroke-linecap': 'round'
+  }, base));
+  DATA.chambers.forEach(c => el('rect', {
+    x: c.x - 4, y: c.y - 4, width: 8, height: 8,
+    fill: 'var(--paper)', stroke: 'var(--existing)', 'stroke-width': 1.6
+  }, base));
+  if (DATA.source) {
+    el('circle', { cx: DATA.source.x, cy: DATA.source.y, r: 9, fill: 'var(--existing)' }, base);
+    el('text', {
+      x: DATA.source.x + 14, y: DATA.source.y + 4, fill: 'var(--ink)',
+      'font-size': 13, 'font-family': 'Cascadia Mono, Consolas, monospace'
+    }, base).textContent = DATA.source.name;
+  }
+  DATA.oks.forEach(o => {
+    el('circle', { cx: o.x, cy: o.y, r: 5, fill: 'var(--oks)' }, base);
+  });
+
+  // --- слой варианта ---
+  const variantLayer = el('g', {});
+  const info = document.getElementById('seg-info');
+
+  function showVariant(vid) {
+    variantLayer.innerHTML = '';
+    const v = DATA.variants[vid];
+    v.segments.forEach(s => {
+      const line = el('polyline', {
+        points: pts(s.pts), fill: 'none', stroke: 'var(--accent)',
+        'stroke-width': duWidth(s.du), 'stroke-linecap': 'round',
+        'stroke-linejoin': 'round',
+        'stroke-dasharray': s.special ? '7 4' : 'none'
+      }, variantLayer);
+      const hit = el('polyline', {
+        points: pts(s.pts), fill: 'none', stroke: 'transparent', 'stroke-width': 12
+      }, variantLayer);
+      hit.addEventListener('mouseenter', () => {
+        line.setAttribute('stroke-width', duWidth(s.du) + 2.5);
+        info.innerHTML = `<table>
+          <tr><td>Участок</td><td>${s.special ? 'специальный проход' : 'обычный'}</td></tr>
+          <tr><td>ДУ</td><td>${s.du} мм</td></tr>
+          <tr><td>Расход</td><td>${s.flow} т/ч</td></tr>
+          <tr><td>Длина</td><td>${fmtM(s.len)}</td></tr>
+          <tr><td>Стоимость</td><td>${fmtRub(s.cost)}</td></tr></table>`;
+      });
+      hit.addEventListener('mouseleave', () => {
+        line.setAttribute('stroke-width', duWidth(s.du));
+      });
+    });
+    v.chambers.forEach(c => el('circle', {
+      cx: c.x, cy: c.y, r: 5, fill: 'var(--accent)', stroke: 'var(--paper)', 'stroke-width': 1.5
+    }, variantLayer));
+    v.tech.forEach(t => el('circle', {
+      cx: t.x, cy: t.y, r: 3, fill: 'var(--paper)', stroke: 'var(--accent)', 'stroke-width': 1.5
+    }, variantLayer));
+
+    const s = v.summary;
+    document.getElementById('summary').innerHTML = `
+      <div><span class="v">${fmtRub(s.cost)}</span><span class="k">итоговая стоимость</span></div>
+      <div><span class="v">${fmtM(s.len)}</span><span class="k">новая сеть</span></div>
+      <div><span class="v">${s.score}</span><span class="k">показатель S (меньше — лучше)</span></div>
+      <div><span class="v">${v.chambers.length} / ${s.tiein_count}</span><span class="k">новых камер / врезок</span></div>
+      <div><span class="v">${s.unconnected.length === 0 ? 'все 17' : 17 - s.unconnected.length + ' из 17'}</span><span class="k">ОКС подключено</span></div>`;
+    document.querySelectorAll('.variant').forEach(b =>
+      b.classList.toggle('active', b.dataset.vid === vid));
+  }
+
+  // --- переключатель вариантов ---
+  const order = Object.keys(DATA.variants)
+    .sort((a, b) => DATA.variants[a].summary.rank - DATA.variants[b].summary.rank);
+  const variantsBox = document.getElementById('variants');
+  order.forEach(vid => {
+    const v = DATA.variants[vid];
+    const b = document.createElement('button');
+    b.className = 'variant';
+    b.dataset.vid = vid;
+    b.innerHTML = `<span class="rank">#${v.summary.rank}</span>
+      <span class="name">${v.name}</span>
+      <span class="stats"><span>${fmtRub(v.summary.cost)}</span><span>${fmtM(v.summary.len)}</span></span>`;
+    b.addEventListener('click', () => showVariant(vid));
+    variantsBox.appendChild(b);
+  });
+
+  // --- легенда ---
+  const leg = document.getElementById('legend');
+  const legRow = (svgInner, text) => {
+    const row = document.createElement('div'); row.className = 'row';
+    row.innerHTML = `<svg width="34" height="14" viewBox="0 0 34 14">${svgInner}</svg><span>${text}</span>`;
+    leg.appendChild(row);
+  };
+  legRow('<line x1="2" y1="7" x2="32" y2="7" stroke="var(--accent)" stroke-width="3"/>', 'новая тепловая сеть');
+  legRow('<line x1="2" y1="7" x2="32" y2="7" stroke="var(--accent)" stroke-width="3" stroke-dasharray="6 3"/>', 'специальный проход');
+  legRow('<line x1="2" y1="7" x2="32" y2="7" stroke="var(--existing)" stroke-width="2.5" stroke-dasharray="8 4"/>', 'существующая сеть');
+  legRow('<rect x="12" y="2" width="10" height="10" fill="none" stroke="var(--existing)" stroke-width="1.6"/>', 'существующая камера');
+  legRow('<circle cx="17" cy="7" r="5" fill="var(--accent)"/>', 'новая камера');
+  legRow('<circle cx="17" cy="7" r="4" fill="var(--paper)" stroke="var(--accent)" stroke-width="1.5"/>', 'технический узел');
+  legRow('<circle cx="17" cy="7" r="5" fill="var(--oks)"/>', 'точка подключения ОКС');
+
+  // --- пан и зум ---
+  let drag = null;
+  svg.addEventListener('pointerdown', e => {
+    drag = { x: e.clientX, y: e.clientY };
+    svg.classList.add('dragging');
+    svg.setPointerCapture(e.pointerId);
+  });
+  svg.addEventListener('pointermove', e => {
+    if (!drag) return;
+    const k = vb.w / svg.clientWidth;
+    vb.x -= (e.clientX - drag.x) * k;
+    vb.y -= (e.clientY - drag.y) * k;
+    drag = { x: e.clientX, y: e.clientY };
+    applyVb();
+  });
+  svg.addEventListener('pointerup', () => { drag = null; svg.classList.remove('dragging'); });
+  svg.addEventListener('wheel', e => {
+    e.preventDefault();
+    const k = e.deltaY > 0 ? 1.15 : 1 / 1.15;
+    const r = svg.getBoundingClientRect();
+    const mx = vb.x + (e.clientX - r.left) / r.width * vb.w;
+    const my = vb.y + (e.clientY - r.top) / r.height * vb.h;
+    vb = { x: mx - (mx - vb.x) * k, y: my - (my - vb.y) * k, w: vb.w * k, h: vb.h * k };
+    applyVb();
+  }, { passive: false });
+
+  window.addEventListener('resize', () => { fitAspect(); applyVb(); });
+  fitAspect(); applyVb();
+  showVariant(order[0]);
+})();
+</script>

@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HEATNET — трассировка тепловых сетей</title>
+<style>
+  :root {
+    --accent: #FF0053;
+    --accent-soft: #FFD6E4;
+    --purple: #520978;
+    --deep: #310F53;
+    --ink: #1C1D22;
+    --muted: #6E6A77;
+    --line: #E4DCEC;
+    --paper: #F6F4F8;
+    --card: #FFFFFF;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; font: 14px/1.45 "Segoe UI", system-ui, sans-serif;
+    color: var(--ink); background: var(--paper);
+    display: flex; flex-direction: column; height: 100vh;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+    padding: 10px 18px; background: var(--card); border-bottom: 1px solid var(--line);
+  }
+  header h1 { margin: 0; font-size: 17px; letter-spacing: .04em; }
+  header h1 b { color: var(--accent); }
+  header .sub { color: var(--muted); font-size: 12.5px; }
+  main { flex: 1; display: flex; min-height: 0; }
+  aside {
+    width: 370px; flex: none; overflow-y: auto; padding: 14px;
+    display: flex; flex-direction: column; gap: 12px;
+    background: var(--card); border-right: 1px solid var(--line);
+  }
+  section.card {
+    border: 1px solid var(--line); border-radius: 8px; padding: 12px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .label {
+    font-size: 11px; font-weight: 600; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--purple);
+  }
+  #drop {
+    border: 1.5px dashed var(--line); border-radius: 8px; padding: 14px;
+    text-align: center; color: var(--muted); cursor: pointer;
+  }
+  #drop.armed { border-color: var(--accent); color: var(--ink); background: #FFF6F9; }
+  #drop b { color: var(--ink); }
+  textarea {
+    width: 100%; height: 180px; resize: vertical;
+    font: 11.5px/1.4 Consolas, "Cascadia Mono", monospace;
+    border: 1px solid var(--line); border-radius: 6px; padding: 8px; color: var(--ink);
+  }
+  button {
+    font: 600 14px/1 inherit; padding: 10px 14px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--card); color: var(--ink);
+    cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:disabled { background: #E8B7C8; border-color: #E8B7C8; cursor: default; }
+  button.ghost { font-weight: 500; font-size: 12.5px; padding: 6px 10px; }
+  button:focus-visible { outline: 2px solid var(--purple); outline-offset: 2px; }
+  #status { font-size: 13px; color: var(--muted); min-height: 18px; }
+  #status.err { color: #B0413E; }
+  #status.ok { color: #0E7A4E; }
+  .variants { display: flex; flex-direction: column; gap: 6px; }
+  .variant {
+    text-align: left; padding: 8px 10px; border-radius: 8px; font-weight: 500;
+  }
+  .variant.active { border-color: var(--accent); background: #FFF3F7; }
+  .variant .vname { font-weight: 600; }
+  .variant .vstats { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .modes { display: flex; gap: 6px; }
+  .modes button { flex: 1; font-size: 12.5px; padding: 7px 6px; }
+  .modes button.active { border-color: var(--purple); color: var(--purple); font-weight: 700; }
+  #summary { display: grid; grid-template-columns: 1fr 1fr; gap: 7px 10px; }
+  #summary .v { font: 600 15px/1.25 Consolas, monospace; font-variant-numeric: tabular-nums; }
+  #summary .k { font-size: 11px; color: var(--muted); }
+  #breakdown { margin-top: 12px; border-top: 1px solid var(--accent-soft); padding-top: 8px; }
+  #breakdown .bd-title { font: 600 11px/1 sans-serif; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--purple); margin-bottom: 8px; }
+  .bd-row { margin-bottom: 7px; }
+  .bd-row .bd-line { display: flex; justify-content: space-between; gap: 8px;
+    font-size: 12px; }
+  .bd-row .bd-val { font-family: Consolas, monospace; font-variant-numeric: tabular-nums;
+    white-space: nowrap; }
+  .bd-row .bd-track { height: 5px; background: var(--accent-soft); border-radius: 3px;
+    margin-top: 3px; position: relative; }
+  .bd-row .bd-bar { position: absolute; top: 0; height: 5px; border-radius: 3px;
+    background: var(--accent); }
+  .bd-row.bd-base .bd-bar { background: var(--purple); }
+  .bd-row.bd-total .bd-line { font-weight: 600; }
+  .bd-row.bd-total .bd-track { background: #2b2140; }
+  .downloads { display: flex; flex-wrap: wrap; gap: 6px; }
+  #map-wrap { flex: 1; position: relative; min-width: 0; }
+  #map { width: 100%; height: 100%; display: block; cursor: grab; background: #fff; }
+  #map.drag { cursor: grabbing; }
+  #tooltip {
+    position: absolute; pointer-events: none; display: none; z-index: 5;
+    background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 10px; font-size: 12.5px; box-shadow: 0 4px 14px rgba(49,15,83,.12);
+    max-width: 260px;
+  }
+  #tooltip table td { padding: 1px 8px 1px 0; font-variant-numeric: tabular-nums; }
+  #tooltip td:first-child { color: var(--muted); }
+  #legend {
+    position: absolute; left: 12px; bottom: 12px; z-index: 4;
+    background: rgba(255,255,255,.94); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 12px; font-size: 12px;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  #legend .row { display: flex; align-items: center; gap: 8px; }
+  #legend[hidden] { display: none; }
+  #hint {
+    position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; color: var(--muted); font-size: 15px; z-index: 1;
+    text-align: center; padding: 0 40px;
+  }
+  a.plain { color: var(--purple); }
+</style>
+</head>
+<body>
+<header>
+  <h1><b>HEAT</b>NET · трассировка тепловых сетей</h1>
+  <span class="sub">Лидеры цифровой трансформации 2026 · вход и выход — GeoJSON (WGS 84) · <a class="plain" href="/swagger-ui.html" target="_blank" rel="noopener">Swagger API</a></span>
+</header>
+<main>
+  <aside>
+    <section class="card">
+      <div class="label">1 · Входные данные</div>
+      <div id="drop" tabindex="0" role="button" aria-label="Выбрать входной файл GeoJSON">
+        Перетащите GeoJSON сюда<br>или <b>нажмите для выбора</b>
+      </div>
+      <input id="file" type="file" accept=".geojson,.json" hidden>
+      <div id="filemeta" class="sub"></div>
+    </section>
+
+    <section class="card">
+      <div class="label">2 · Справочник ограничений</div>
+      <div class="sub">Правила таблицы 2 можно править для этого расчёта — YAML применяется поверх встроенных.</div>
+      <textarea id="rules" spellcheck="false" aria-label="Справочник ограничений (YAML)"></textarea>
+      <div><button class="ghost" id="rules-reset">Сбросить к действующему</button></div>
+    </section>
+
+    <section class="card">
+      <div class="label">3 · Расчёт</div>
+      <button class="primary" id="run" disabled>Рассчитать варианты</button>
+      <div id="status"></div>
+    </section>
+
+    <section class="card" id="results" hidden>
+      <div class="label">4 · Варианты</div>
+      <div class="modes">
+        <button id="mode-2d" class="active">Базовый 2D</button>
+        <button id="mode-depth">С учётом глубины</button>
+      </div>
+      <div class="variants" id="variants"></div>
+      <div id="summary"></div>
+      <div id="breakdown" hidden>
+        <div class="bd-title">Интерпретация стоимости</div>
+        <div id="bd-rows"></div>
+      </div>
+      <div class="downloads">
+        <button class="ghost" data-dl="result">GeoJSON</button>
+        <button class="ghost" data-dl="result-depth">GeoJSON (глубина)</button>
+        <button class="ghost" data-dl="report">PDF-записка</button>
+      </div>
+    </section>
+  </aside>
+
+  <div id="map-wrap">
+    <svg id="map" aria-label="Карта трассировки"></svg>
+    <div id="hint">Загрузите входной GeoJSON и запустите расчёт —<br>карта района и варианты трассировки появятся здесь</div>
+    <div id="tooltip"></div>
+    <div id="legend" hidden>
+      <div class="row"><svg width="30" height="12"><line x1="2" y1="6" x2="28" y2="6" stroke="#FF0053" stroke-width="3"/></svg>новая сеть (пунктир — спецпроход)</div>
+      <div class="row"><svg width="30" height="12"><line x1="2" y1="6" x2="28" y2="6" stroke="#520978" stroke-width="2.5" stroke-dasharray="6 3"/></svg>существующая сеть</div>
+      <div class="row"><svg width="30" height="12"><circle cx="15" cy="6" r="4.5" fill="#310F53"/></svg>точки подключения ОКС</div>
+      <div class="row"><svg width="30" height="12"><circle cx="15" cy="6" r="4.5" fill="#FF0053"/></svg>новые камеры · <svg width="14" height="12"><circle cx="7" cy="6" r="4" fill="#fff" stroke="#FF0053" stroke-width="1.5"/></svg> техузлы</div>
+    </div>
+  </div>
+</main>
+
+<script>
+(function () {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const svg = $('map');
+  const NS = 'http://www.w3.org/2000/svg';
+  const fmtRub = n => new Intl.NumberFormat('ru-RU').format(Math.round(n)) + ' ₽';
+  const fmtM = n => new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 }).format(n) + ' м';
+
+  let inputFile = null;
+  let baseData = null;      // распарсенный входной набор (для подложки)
+  let jobId = null;
+  let modeData = { '2d': null, depth: null };   // FeatureCollection результатов
+  let mode = '2d';
+  let currentVariant = null;
+
+  // ---------- проекция: локальная равнопромежуточная ----------
+  const proj = { lat0: 0, lon0: 0, k: 111320, ready: false };
+  function toXY(lon, lat) {
+    return [ (lon - proj.lon0) * proj.k * Math.cos(proj.lat0 * Math.PI / 180),
+             (proj.lat0 - lat) * proj.k ];
+  }
+
+  // ---------- загрузка файла ----------
+  const drop = $('drop'), fileInput = $('file');
+  drop.addEventListener('click', () => fileInput.click());
+  drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') fileInput.click(); });
+  drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('armed'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('armed'));
+  drop.addEventListener('drop', e => {
+    e.preventDefault(); drop.classList.remove('armed');
+    if (e.dataTransfer.files.length) setFile(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener('change', () => { if (fileInput.files.length) setFile(fileInput.files[0]); });
+
+  function setFile(f) {
+    inputFile = f;
+    baseData = null;
+    $('filemeta').textContent = f.name + ' · ' + (f.size / 1024 / 1024).toFixed(2) + ' МБ';
+    $('run').disabled = false;
+    drop.classList.add('armed');
+    drop.innerHTML = '<b>' + escapeHtml(f.name) + '</b><br>нажмите, чтобы заменить';
+    if (f.size <= 64 * 1024 * 1024) {
+      f.text().then(t => { try { baseData = JSON.parse(t); drawAll(); } catch (e) { /* нарисуем после расчёта */ } });
+    } else {
+      status('Файл больше 64 МБ — подложка не отображается, результат будет показан', '');
+    }
+  }
+  function escapeHtml(s) { const d = document.createElement('span'); d.textContent = s; return d.innerHTML; }
+
+  // ---------- справочник ----------
+  function loadRules() {
+    fetch('/api/v1/rules').then(r => r.text()).then(t => { $('rules').value = t; });
+  }
+  $('rules-reset').addEventListener('click', loadRules);
+  loadRules();
+
+  // ---------- запуск расчёта ----------
+  const statusEl = $('status');
+  function status(text, cls) { statusEl.textContent = text; statusEl.className = cls || ''; }
+
+  $('run').addEventListener('click', () => {
+    if (!inputFile) return;
+    $('run').disabled = true;
+    $('results').hidden = true;
+    modeData = { '2d': null, depth: null };
+    const form = new FormData();
+    form.append('file', inputFile);
+    const rulesText = $('rules').value.trim();
+    if (rulesText) form.append('rules', new Blob([rulesText], { type: 'text/yaml' }), 'rules.yml');
+    status('Загрузка файла…');
+    const started = Date.now();
+    fetch('/api/v1/tracing/jobs', { method: 'POST', body: form })
+      .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e)))
+      .then(j => { jobId = j.job_id; poll(started); })
+      .catch(e => { status('Ошибка: ' + (e.message || e.error || JSON.stringify(e)), 'err'); $('run').disabled = false; });
+  });
+
+  function poll(started) {
+    fetch('/api/v1/tracing/jobs/' + jobId).then(r => r.json()).then(j => {
+      const sec = ((Date.now() - started) / 1000).toFixed(0);
+      if (j.status === 'DONE') {
+        status('Готово за ' + sec + ' с', 'ok');
+        $('run').disabled = false;
+        loadResults();
+      } else if (j.status === 'ERROR') {
+        status('Ошибка расчёта: ' + (j.error || ''), 'err');
+        $('run').disabled = false;
+      } else {
+        status('Расчёт… ' + sec + ' с (маршруты, диаметры, варианты)');
+        setTimeout(() => poll(started), 700);
+      }
+    }).catch(() => setTimeout(() => poll(started), 1200));
+  }
+
+  function loadResults() {
+    Promise.all([
+      fetch('/api/v1/tracing/jobs/' + jobId + '/result').then(r => r.json()),
+      fetch('/api/v1/tracing/jobs/' + jobId + '/result-depth').then(r => r.ok ? r.json() : null).catch(() => null)
+    ]).then(([res, depth]) => {
+      modeData['2d'] = res;
+      modeData.depth = depth;
+      mode = '2d';
+      $('results').hidden = false;
+      renderVariantList();
+      drawAll();
+    });
+  }
+
+  // ---------- скачивание ----------
+  document.querySelectorAll('[data-dl]').forEach(b => b.addEventListener('click', () => {
+    if (!jobId) return;
+    window.open('/api/v1/tracing/jobs/' + jobId + '/' + b.dataset.dl, '_blank');
+  }));
+
+  // ---------- варианты ----------
+  $('mode-2d').addEventListener('click', () => setMode('2d'));
+  $('mode-depth').addEventListener('click', () => setMode('depth'));
+  function setMode(m) {
+    if (!modeData[m]) return;
+    mode = m;
+    $('mode-2d').classList.toggle('active', m === '2d');
+    $('mode-depth').classList.toggle('active', m === 'depth');
+    renderVariantList();
+    drawAll();
+  }
+
+  function groupVariants(fc) {
+    const map = {};
+    (fc && fc.features || []).forEach(f => {
+      const p = f.properties || {};
+      const vid = p.variant_id;
+      if (vid == null) return;
+      (map[vid] = map[vid] || { id: vid, features: [], summary: null }).features.push(f);
+      if (p.object_type === 'variant_summary') map[vid].summary = p;
+    });
+    return Object.values(map).sort((a, b) => (a.summary?.rank || 9) - (b.summary?.rank || 9));
+  }
+
+  function renderVariantList() {
+    const groups = groupVariants(modeData[mode]);
+    const box = $('variants');
+    box.innerHTML = '';
+    groups.forEach((g, i) => {
+      const b = document.createElement('button');
+      b.className = 'variant';
+      const s = g.summary || {};
+      b.innerHTML = '<span class="vname">#' + (s.rank || '?') + ' · вариант ' + g.id + '</span><br>'
+        + '<span class="vstats">' + fmtRub(s.calculated_cost || 0) + ' · ' + fmtM(s.new_network_length || 0)
+        + ' · score ' + (s.score ?? '—') + '</span>';
+      b.addEventListener('click', () => selectVariant(g.id));
+      box.appendChild(b);
+    });
+    if (groups.length) selectVariant(groups[0].id);
+  }
+
+  function selectVariant(vid) {
+    currentVariant = vid;
+    document.querySelectorAll('.variant').forEach((b, i) => {
+      const groups = groupVariants(modeData[mode]);
+      b.classList.toggle('active', groups[i] && groups[i].id === vid);
+    });
+    const g = groupVariants(modeData[mode]).find(g => g.id === vid);
+    const s = g && g.summary || {};
+    $('summary').innerHTML =
+      cell(fmtRub(s.construction_cost || 0), 'стоимость строительства')
+      + cell(fmtM(s.new_network_length || 0), 'новая сеть')
+      + cell(String(s.score ?? '—'), 'показатель S')
+      + cell((s.existing_chamber_tie_in_count || 0) + ' врезок', fmtRub(s.existing_chamber_tie_in_cost || 0))
+      + cell(s.unconnected_oks_ids && s.unconnected_oks_ids.length
+            ? 'не подключено: ' + s.unconnected_oks_ids.join(', ')
+            : 'все ОКС подключены',
+            s.unconnected_penalty ? 'штраф ' + fmtRub(s.unconnected_penalty) : 'без штрафов');
+    renderBreakdown(g);
+    drawAll();
+  }
+  function cell(v, k) { return '<div><div class="v">' + v + '</div><div class="k">' + k + '</div></div>'; }
+
+  // ---------- интерпретация стоимости (каскад факторов) ----------
+  // руб/м и пропускная способность по таблице 1 техприложения
+  const PIPE_RATES = { 50:74023, 65:78631, 80:83530, 100:89748, 125:97275, 150:105507,
+    200:120275, 250:135323, 300:150022, 400:190299, 500:224137, 600:264790,
+    700:324298, 800:325996, 900:327693, 1000:418777, 1200:428074, 1400:683417 };
+  const PIPE_CAPS = [[50,3.5],[65,8.3],[80,13.2],[100,22.3],[125,40.2],[150,65.1],
+    [200,152.3],[250,274.9],[300,437.4],[400,943.1],[500,1663.4],[600,2627.7],
+    [700,3735.1],[800,5296.8],[900,7165.0],[1000,9391.8],[1200,15012.8],[1400,22501.9]];
+  function minRateForFlow(flow) {
+    for (const [du, cap] of PIPE_CAPS) if (cap >= flow) return PIPE_RATES[du];
+    return PIPE_RATES[1400];
+  }
+  function renderBreakdown(g) {
+    const box = $('breakdown'), rowsEl = $('bd-rows');
+    const s = g && g.summary;
+    if (!s) { box.hidden = true; return; }
+    let base = 0, dia = 0, spec = 0, pipes = 0;
+    for (const f of g.features) {
+      const p = f.properties;
+      if (p.object_type !== 'heat_network') continue;
+      const rateMin = minRateForFlow(p.flow_tph), rateFact = PIPE_RATES[p.diameter] || rateMin;
+      pipes += p.cost;
+      base += p.length * rateMin;
+      dia += p.length * (rateFact - rateMin);
+      if (p.laying_method === 'special') spec += p.cost - p.length * rateFact;
+    }
+    let resid = pipes - base - dia - spec; // Kгл в режиме глубины; в 2D — округления
+    if (Math.abs(resid) < 100000) { base += resid; resid = 0; }
+    const total = Math.max(1, s.calculated_cost || 1);
+    const items = [['Трубы минимального по расходу ДУ', base, 'bd-base', false]];
+    if (dia > 1) items.push(['Магистральные диаметры (предельные длины)', dia, '', true]);
+    if (spec > 1) items.push(['Спецпроходы (Kспец)', spec, '', true]);
+    if (resid > 1) items.push(['Заглубление ниже 3 м (Kгл)', resid, '', true]);
+    if (s.chamber_construction_cost > 0)
+      items.push(['Новые тепловые камеры', s.chamber_construction_cost, '', true]);
+    if (s.existing_chamber_tie_in_cost > 0)
+      items.push(['Врезки в существующие камеры', s.existing_chamber_tie_in_cost, '', true]);
+    if (s.unconnected_penalty > 0)
+      items.push(['Штрафы за неподключённые ОКС', s.unconnected_penalty, '', true]);
+    let offset = 0, html = '';
+    for (const [label, value, cls, plus] of items) {
+      const left = Math.min(99.6, 100 * offset / total);
+      const w = Math.max(0.4, Math.min(100 - left, 100 * value / total));
+      html += '<div class="bd-row ' + cls + '"><div class="bd-line"><span>' + label
+        + '</span><span class="bd-val">' + (plus ? '+ ' : '') + fmtRub(value)
+        + '</span></div><div class="bd-track"><div class="bd-bar" style="left:'
+        + left.toFixed(2) + '%;width:' + w.toFixed(2) + '%"></div></div></div>';
+      offset += value;
+    }
+    html += '<div class="bd-row bd-total"><div class="bd-line"><span>Итого</span>'
+      + '<span class="bd-val">' + fmtRub(total) + '</span></div>'
+      + '<div class="bd-track"></div></div>';
+    rowsEl.innerHTML = html;
+    box.hidden = false;
+  }
+
+  // ---------- отрисовка ----------
+  let vb = null;
+  function el(name, attrs, parent) {
+    const e = document.createElementNS(NS, name);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    (parent || svg).appendChild(e);
+    return e;
+  }
+  const duWidth = du => 1.6 + (du || 100) / 110;
+
+  function geomBounds(features) {
+    let minLon = 1e9, maxLon = -1e9, minLat = 1e9, maxLat = -1e9;
+    const scan = c => { minLon = Math.min(minLon, c[0]); maxLon = Math.max(maxLon, c[0]);
+                        minLat = Math.min(minLat, c[1]); maxLat = Math.max(maxLat, c[1]); };
+    const walk = g => {
+      if (!g) return;
+      if (g.type === 'Point') scan(g.coordinates);
+      else if (g.type === 'LineString') g.coordinates.forEach(scan);
+      else if (g.type === 'MultiLineString' || g.type === 'Polygon') g.coordinates.forEach(r => r.forEach(scan));
+      else if (g.type === 'MultiPolygon') g.coordinates.forEach(p => p.forEach(r => r.forEach(scan)));
+    };
+    features.forEach(f => walk(f.geometry));
+    return maxLon < minLon ? null : { minLon, maxLon, minLat, maxLat };
+  }
+
+  function ringPath(ring) {
+    return 'M' + ring.map(c => toXY(c[0], c[1]).map(v => v.toFixed(1)).join(',')).join('L') + 'Z';
+  }
+  function linePts(coords) {
+    return coords.map(c => toXY(c[0], c[1]).map(v => v.toFixed(1)).join(',')).join(' ');
+  }
+
+  function drawAll() {
+    const resultFc = modeData[mode];
+    const baseFeatures = baseData && baseData.features || [];
+    const resultFeatures = resultFc && resultFc.features || [];
+    if (!baseFeatures.length && !resultFeatures.length) return;
+    $('hint').style.display = 'none';
+    $('legend').hidden = false;
+
+    const b = geomBounds(baseFeatures.length ? baseFeatures : resultFeatures);
+    if (!b) return;
+    proj.lat0 = (b.minLat + b.maxLat) / 2;
+    proj.lon0 = b.minLon;
+    proj.ready = true;
+    const [maxX] = toXY(b.maxLon, proj.lat0);
+    const [, maxY] = toXY(b.minLon, b.minLat);
+    const [, minY] = toXY(b.minLon, b.maxLat);
+
+    svg.innerHTML = '';
+    const world = { x: -40, y: minY - 40, w: maxX + 80, h: (maxY - minY) + 80 };
+    if (!vb) vb = { ...world };
+    fitAspect(world);
+
+    // подложка
+    baseFeatures.forEach(f => {
+      const p = f.properties || {}, g = f.geometry;
+      if (!g) return;
+      if (p.object_type === 'restriction') {
+        const polys = g.type === 'MultiPolygon' ? g.coordinates : g.type === 'Polygon' ? [g.coordinates] : [];
+        const style = p.restriction_type === 'water'
+          ? { fill: '#C9DEF0', stroke: 'none' }
+          : p.restriction_type === 'railway'
+            ? { fill: '#DDD6E4', stroke: '#B0A6BE' }
+            : p.restriction_type === 'oks'
+              ? { fill: '#EBE5F2', stroke: '#B8ABCB' }
+              : { fill: '#E8E3D9', stroke: '#B0A6BE' };
+        polys.forEach(rings => el('path', {
+          d: rings.map(ringPath).join(' '), 'fill-rule': 'evenodd',
+          fill: style.fill, stroke: style.stroke, 'stroke-width': 0.7
+        }));
+        const lines = g.type === 'MultiLineString' ? g.coordinates : g.type === 'LineString' ? [g.coordinates] : [];
+        lines.forEach(c => el('polyline', { points: linePts(c), fill: 'none', stroke: '#B0A6BE', 'stroke-width': 2.5 }));
+      } else if (p.object_type === 'heat_network' && g.type === 'LineString') {
+        // dashed + linecap:round вешает растеризацию скриншотов Chrome —
+        // у пунктирных линий оставляем прямые торцы
+        el('polyline', { points: linePts(g.coordinates), fill: 'none', stroke: '#520978',
+          'stroke-width': duWidth(p.diameter) * 0.8, 'stroke-dasharray': '9 5' });
+      } else if (p.object_type === 'heat_chamber' && g.type === 'Point') {
+        const [x, y] = toXY(g.coordinates[0], g.coordinates[1]);
+        el('rect', { x: x - 4, y: y - 4, width: 8, height: 8, fill: '#fff', stroke: '#520978', 'stroke-width': 1.5 });
+      } else if (p.object_type === 'source' && g.type === 'Point') {
+        const [x, y] = toXY(g.coordinates[0], g.coordinates[1]);
+        el('circle', { cx: x, cy: y, r: 8, fill: '#520978' });
+        el('circle', { cx: x, cy: y, r: 3, fill: '#fff' });
+      }
+    });
+
+    // результат выбранного варианта
+    resultFeatures.filter(f => (f.properties || {}).variant_id === currentVariant).forEach(f => {
+      const p = f.properties, g = f.geometry;
+      if (!g) return;
+      if (p.object_type === 'heat_network') {
+        // без linecap/linejoin round: они подвешивают растеризацию
+        // скриншотов Chrome на насыщенных полилиниями страницах
+        const special = p.laying_method === 'special';
+        const line = el('polyline', {
+          points: linePts(g.coordinates), fill: 'none', stroke: '#FF0053',
+          'stroke-width': duWidth(p.diameter),
+          'stroke-dasharray': special ? '7 4' : 'none'
+        });
+        const hit = el('polyline', { points: linePts(g.coordinates), fill: 'none',
+          stroke: 'transparent', 'stroke-width': 12 });
+        hit.addEventListener('mousemove', e => showTip(e, p, line));
+        hit.addEventListener('mouseleave', () => hideTip(line, p));
+      } else if (p.object_type === 'heat_chamber') {
+        const [x, y] = toXY(g.coordinates[0], g.coordinates[1]);
+        el('circle', { cx: x, cy: y, r: 5, fill: '#FF0053', stroke: '#fff', 'stroke-width': 1.4 });
+      } else if (p.object_type === 'technical_node') {
+        const [x, y] = toXY(g.coordinates[0], g.coordinates[1]);
+        el('circle', { cx: x, cy: y, r: 3.5, fill: '#fff', stroke: '#FF0053', 'stroke-width': 1.5 });
+      }
+    });
+
+    // точки ОКС поверх
+    baseFeatures.filter(f => (f.properties || {}).object_type === 'oks_connection_point')
+      .forEach(f => {
+        const [x, y] = toXY(f.geometry.coordinates[0], f.geometry.coordinates[1]);
+        el('circle', { cx: x, cy: y, r: 5, fill: '#310F53', stroke: '#fff', 'stroke-width': 1.2 });
+      });
+
+    applyVb();
+  }
+
+  // ---------- tooltip ----------
+  const tip = $('tooltip');
+  function showTip(e, p, line) {
+    line.setAttribute('stroke-width', duWidth(p.diameter) + 2.5);
+    const rows = [
+      ['Участок', p.id],
+      ['ДУ', p.diameter + ' мм'],
+      ['Расход', p.flow_tph + ' т/ч'],
+      ['Длина', fmtM(p.length)],
+      ['Прокладка', p.laying_method === 'special' ? 'спецпроход' : 'обычная'],
+      ['Стоимость', fmtRub(p.cost)]
+    ];
+    if (p.depth_start != null) rows.push(['Глубина', p.depth_start + ' → ' + p.depth_end + ' м']);
+    tip.innerHTML = '<table>' + rows.map(r => '<tr><td>' + r[0] + '</td><td>' + r[1] + '</td></tr>').join('') + '</table>';
+    tip.style.display = 'block';
+    const wrap = $('map-wrap').getBoundingClientRect();
+    tip.style.left = Math.min(e.clientX - wrap.left + 14, wrap.width - 270) + 'px';
+    tip.style.top = (e.clientY - wrap.top + 14) + 'px';
+  }
+  function hideTip(line, p) {
+    line.setAttribute('stroke-width', duWidth(p.diameter));
+    tip.style.display = 'none';
+  }
+
+  // ---------- пан/зум ----------
+  function fitAspect(world) {
+    const r = svg.clientWidth / Math.max(1, svg.clientHeight);
+    vb = { ...world };
+    if (vb.w / vb.h < r) { const w = vb.h * r; vb.x -= (w - vb.w) / 2; vb.w = w; }
+    else { const h = vb.w / r; vb.y -= (h - vb.h) / 2; vb.h = h; }
+  }
+  function applyVb() { svg.setAttribute('viewBox', vb.x + ' ' + vb.y + ' ' + vb.w + ' ' + vb.h); }
+  let dragState = null;
+  svg.addEventListener('pointerdown', e => {
+    dragState = { x: e.clientX, y: e.clientY };
+    svg.classList.add('drag'); svg.setPointerCapture(e.pointerId);
+  });
+  svg.addEventListener('pointermove', e => {
+    if (!dragState) return;
+    const k = vb.w / svg.clientWidth;
+    vb.x -= (e.clientX - dragState.x) * k;
+    vb.y -= (e.clientY - dragState.y) * k;
+    dragState = { x: e.clientX, y: e.clientY };
+    applyVb();
+  });
+  svg.addEventListener('pointerup', () => { dragState = null; svg.classList.remove('drag'); });
+  svg.addEventListener('wheel', e => {
+    e.preventDefault();
+    if (!vb) return;
+    const k = e.deltaY > 0 ? 1.15 : 1 / 1.15;
+    const r = svg.getBoundingClientRect();
+    const mx = vb.x + (e.clientX - r.left) / r.width * vb.w;
+    const my = vb.y + (e.clientY - r.top) / r.height * vb.h;
+    vb = { x: mx - (mx - vb.x) * k, y: my - (my - vb.y) * k, w: vb.w * k, h: vb.h * k };
+    applyVb();
+  }, { passive: false });
+})();
+</script>
+</body>
+</html>

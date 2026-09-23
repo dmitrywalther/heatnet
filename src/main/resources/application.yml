@@ -1,0 +1,40 @@
+spring:
+  application:
+    name: heatnet
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:heatnet}
+    username: ${DB_USER:heatnet}
+    password: ${DB_PASSWORD:heatnet}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+    properties:
+      hibernate.jdbc.lob.non_contextual_creation: true
+  servlet:
+    multipart:
+      # входной файл до 3 ГБ (требование ТЗ, п. 3.2)
+      max-file-size: 3GB
+      max-request-size: 3GB
+      # большие файлы сразу пишутся во временное дисковое хранилище
+      file-size-threshold: 1MB
+
+server:
+  port: ${SERVER_PORT:8080}
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+heatnet:
+  storage-dir: ${HEATNET_STORAGE:./data}
+  # необязательный YAML со справочником ограничений поверх таблицы 2
+  # (пример: config/rules-example.yml)
+  rules-file: ${HEATNET_RULES_FILE:}
+
+logging:
+  level:
+    ru.lct.heatnet: INFO

@@ -1,0 +1,12 @@
+# Демонстрационный профиль: сервер с веб-интерфейсом без внешней СУБД
+# (встроенная H2 в памяти). Основной режим по ТЗ — PostgreSQL (docker-compose).
+#   java -jar heatnet.jar --spring.profiles.active=demo
+spring:
+  datasource:
+    url: jdbc:h2:mem:heatnet;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
