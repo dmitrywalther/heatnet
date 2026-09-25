@@ -1,0 +1,713 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Как HEATNET ищет трассу</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700&family=Golos+Text:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+:root{
+  --bg:#faf7fb; --panel:#ffffff; --ink:#2b2140; --muted:#7d7391;
+  --accent:#FF0053; --accent-soft:rgba(255,0,83,.10);
+  --purple:#520978; --purple-soft:#b18ccc;
+  --zone:rgba(255,0,83,.07); --zone-line:rgba(255,0,83,.45);
+  --graph:rgba(82,9,120,.18); --node:#a678c8;
+  --bld:#e6e0ec; --bld-line:#cfc5dc; --water:#c7dff0; --road:#efe9df; --road-line:#d8cdb8;
+  --ok:#0a8f5b; --bad:#c92b2b; --line:#e8e2ef; --chip:#f3eef8;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#191322; --panel:#221a2e; --ink:#efe9f6; --muted:#a396b8;
+    --accent:#ff2e6d; --accent-soft:rgba(255,46,109,.14);
+    --purple:#c79bE8; --purple-soft:#8a63a8;
+    --zone:rgba(255,46,109,.10); --zone-line:rgba(255,46,109,.5);
+    --graph:rgba(199,155,232,.22); --node:#9f7cc2;
+    --bld:#332a42; --bld-line:#463a58; --water:#24384a; --road:#332e26; --road-line:#4d4536;
+    --ok:#3fbf8a; --bad:#ff6b6b; --line:#352b44; --chip:#2c2338;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#191322; --panel:#221a2e; --ink:#efe9f6; --muted:#a396b8;
+  --accent:#ff2e6d; --accent-soft:rgba(255,46,109,.14);
+  --purple:#c79bE8; --purple-soft:#8a63a8;
+  --zone:rgba(255,46,109,.10); --zone-line:rgba(255,46,109,.5);
+  --graph:rgba(199,155,232,.22); --node:#9f7cc2;
+  --bld:#332a42; --bld-line:#463a58; --water:#24384a; --road:#332e26; --road-line:#4d4536;
+  --ok:#3fbf8a; --bad:#ff6b6b; --line:#352b44; --chip:#2c2338;
+}
+body{background:var(--bg);color:var(--ink);font:15px/1.55 "Golos Text",system-ui,sans-serif;
+  margin:0;padding-block:28px;padding-inline:20px;}
+.wrap{max-width:1180px;margin:0 auto;overflow-wrap:break-word}
+header h1{font:700 clamp(24px,4vw,38px)/1.15 "Unbounded",sans-serif;margin:0 0 6px;text-wrap:balance}
+header h1 em{color:var(--accent);font-style:normal}
+header p{color:var(--muted);margin:0;max-width:64ch}
+.stage{display:flex;gap:20px;margin-top:22px;align-items:stretch;flex-wrap:wrap}
+.mapbox{flex:1 1 560px;min-width:0;background:var(--panel);border:1px solid var(--line);
+  border-radius:14px;padding:10px;display:flex;flex-direction:column;gap:8px}
+.mapbox svg{width:100%;height:auto;display:block}
+.mapbox svg[hidden]{display:none}
+.side{flex:0 1 320px;min-width:280px;display:flex;flex-direction:column;gap:14px}
+.step-card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px;flex:1}
+.eyebrow{font:600 11px/1 "Golos Text";letter-spacing:.14em;text-transform:uppercase;color:var(--accent)}
+.step-card h2{font:600 19px/1.25 "Unbounded",sans-serif;margin:8px 0 10px;text-wrap:balance}
+.step-card p{margin:0 0 10px;color:var(--ink)}
+.step-card p.note{color:var(--muted);font-size:13.5px}
+.chips{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+.chip{display:flex;align-items:center;gap:10px;background:var(--chip);border-radius:9px;
+  padding:8px 12px;font-size:13.5px}
+.chip .sw{flex:0 0 26px;height:0;border-top:3px solid var(--accent)}
+.chip .sw.dash{border-top-style:dashed}
+.chip b{font-family:"JetBrains Mono",monospace;font-weight:600;font-variant-numeric:tabular-nums}
+.chip.badv{color:var(--bad)} .chip.okv{color:var(--ok)}
+.est{margin-top:12px;border-top:1px solid var(--line);padding-top:10px;display:none}
+.est.on{display:block}
+.est .row{display:flex;justify-content:space-between;gap:12px;padding:3px 0;font-size:14px}
+.est .row span:last-child{font-family:"JetBrains Mono",monospace;font-variant-numeric:tabular-nums;white-space:nowrap}
+.est .row.total{border-top:1px solid var(--line);margin-top:6px;padding-top:8px;font-weight:600}
+.est .row.score span:last-child{color:var(--accent);font-weight:600}
+.formula{margin-top:10px;background:var(--accent-soft);border-radius:9px;padding:10px 12px;
+  font-family:"JetBrains Mono",monospace;font-size:12.5px;color:var(--ink)}
+nav.steps{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:center;
+  background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:10px 12px}
+nav.steps button.arrow{background:var(--accent);border:none;color:#fff;border-radius:9px;
+  font:600 14px "Golos Text";padding:9px 16px;cursor:pointer}
+nav.steps button.arrow[disabled]{opacity:.35;cursor:default}
+nav.steps button.arrow.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}
+.dots{display:flex;gap:5px;margin:0 auto}
+.dots button{width:23px;height:23px;border-radius:50%;border:1px solid var(--line);
+  background:transparent;color:var(--muted);font:600 12px "Golos Text";cursor:pointer}
+.dots button.cur{background:var(--accent);border-color:var(--accent);color:#fff}
+.dots button:focus-visible,nav button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+footer{color:var(--muted);font-size:12.5px;margin-top:16px}
+/* SVG layers */
+.L{opacity:0;transition:opacity .6s ease}
+.L.on{opacity:1}
+.bld{fill:var(--bld);stroke:var(--bld-line)}
+.zone{fill:var(--zone);stroke:var(--zone-line);stroke-dasharray:5 4;stroke-width:1.2}
+.gedge{stroke:var(--graph);stroke-width:1}
+.gnode{fill:var(--node)}
+.exp{stroke:var(--accent);stroke-width:1.6;opacity:.35}
+.path-main{stroke:var(--accent);fill:none;stroke-linejoin:round}
+.path-bad{stroke:var(--bad);stroke-width:2.5;stroke-dasharray:7 5;fill:none}
+.path-grid{stroke:var(--muted);stroke-width:2.5;stroke-dasharray:2 4;fill:none}
+.exist{stroke:var(--purple);stroke-width:3;stroke-dasharray:9 6;fill:none}
+.lbl{font:500 12px "Golos Text";fill:var(--ink)}
+.lbl.small{font-size:10.5px;fill:var(--muted)}
+.lbl.mono{font-family:"JetBrains Mono",monospace;font-size:10.5px}
+.tag{font:600 11px "Golos Text";fill:#fff}
+@media (max-width:760px){ .side{flex-basis:100%} }
+@media (prefers-reduced-motion: reduce){ .L{transition:none} }
+</style>
+</head>
+<body>
+<a href="index.html" style="position:fixed;left:16px;top:10px;z-index:50;font:600 13px/1 'Golos Text',sans-serif;color:#FF0053;text-decoration:none;">&larr; к сервису HEATNET</a>
+
+<div class="wrap">
+<header>
+  <h1>Как <em>HEATNET</em> ищет трассу</h1>
+  <p>Интерактивный разбор на учебном квартале. Всё, что видите, страница считает
+  по-настоящему: тот же граф видимости, тот же поиск дешёвого пути и те же
+  расценки из справочника, что и в боевом сервисе.</p>
+</header>
+
+<div class="stage">
+  <div class="mapbox">
+    <svg id="map" viewBox="0 0 940 620" role="img" aria-label="Карта учебного квартала с трассировкой">
+      <g id="Lbase"></g>
+      <g id="Lzones" class="L"></g>
+      <g id="Lgraph" class="L"></g>
+      <g id="Lexplore" class="L"></g>
+      <g id="Lcompare" class="L"></g>
+      <g id="Lpaths" class="L"></g>
+      <g id="Lshared" class="L"></g>
+      <g id="Ldiam" class="L"></g>
+      <g id="Lcross" class="L"></g>
+      <g id="Ltop"></g>
+    </svg>
+    <svg id="profile" viewBox="0 0 940 260" role="img" hidden
+         aria-label="Продольный профиль магистрали с глубинами"></svg>
+  </div>
+  <div class="side">
+    <div class="step-card">
+      <div class="eyebrow" id="stepEyebrow">Шаг 1 из 7</div>
+      <h2 id="stepTitle"></h2>
+      <div id="stepBody"></div>
+      <div class="chips" id="stepChips"></div>
+      <div class="est" id="estimate"></div>
+    </div>
+    <nav class="steps" aria-label="Шаги">
+      <button class="arrow ghost" id="btnPrev">← Назад</button>
+      <div class="dots" id="dots"></div>
+      <button class="arrow" id="btnNext">Дальше →</button>
+    </nav>
+  </div>
+</div>
+<footer>Расценки — таблица 1 технического приложения ЛЦТ-2026; спецпроход дороги — K<span style="font-size:.8em">спец</span> 1,6.
+Масштаб: 1&nbsp;пиксель = 1&nbsp;метр. Стрелки ←/→ переключают шаги.</footer>
+</div>
+
+<script>
+"use strict";
+/* ==================== сцена ==================== */
+const BLD = [ // здания: axis-aligned прямоугольники
+  {x:150,y:70,w:110,h:80},{x:310,y:60,w:120,h:90},{x:470,y:80,w:70,h:110},
+  {x:150,y:210,w:90,h:120},{x:300,y:220,w:130,h:90},{x:470,y:250,w:70,h:100},
+  {x:160,y:400,w:120,h:90},{x:330,y:380,w:110,h:100},
+  {x:640,y:80,w:90,h:90},{x:640,y:380,w:90,h:100},
+];
+const RIVER={x:18,y:0,w:74,h:620};
+const ROAD={x0:562,x1:608};             // вертикальная дорога, Kспец 1.6
+const EXIST_X=790, EXIST_Y0=40, EXIST_Y1=580;
+const CHAMBERS=[{x:EXIST_X,y:130},{x:EXIST_X,y:480}];
+const OKS=[ // порядок подключения: по убыванию расхода
+  {name:"Школа",     p:{x:205,y:450}, bld:6, flow:30},
+  {name:"Жилой дом", p:{x:355,y:262}, bld:4, flow:18},
+  {name:"Детсад",    p:{x:192,y:108}, bld:0, flow:12},
+];
+const MARGIN=14; // отступ + полгабарита, м
+const RATE_BASE=105507;    // руб/м ДУ150 — расчётный габарит для поиска
+const K_ROAD=1.6;
+const TABLE=[ // ДУ, пропускная т/ч, руб/м  (таблица 1)
+  [80,13.2,83530],[100,22.3,89748],[125,40.2,97275],[150,65.1,105507],[200,152.3,120275]
+];
+const TIE_CHAMBER=5e6, NEW_CHAMBER_SMALL=3e6;
+
+const infl=b=>({x:b.x-MARGIN,y:b.y-MARGIN,w:b.w+2*MARGIN,h:b.h+2*MARGIN});
+const ZONES=BLD.map(infl); ZONES.push(infl(RIVER));
+
+/* ==================== геометрия ==================== */
+const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+function segsHit(p,p2,q,q2){
+  const d=(a,b,c)=>(b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x);
+  const d1=d(q,q2,p),d2=d(q,q2,p2),d3=d(p,p2,q),d4=d(p,p2,q2);
+  return ((d1>0)!==(d2>0))&&((d3>0)!==(d4>0));
+}
+function segRectHit(a,b,r,eps=0.8){ // пересекает ли отрезок сжатый прямоугольник
+  const x0=r.x+eps,y0=r.y+eps,x1=r.x+r.w-eps,y1=r.y+r.h-eps;
+  if(x1<=x0||y1<=y0)return false;
+  const inside=p=>p.x>x0&&p.x<x1&&p.y>y0&&p.y<y1;
+  if(inside(a)||inside(b))return true;
+  const c=[{x:x0,y:y0},{x:x1,y:y0},{x:x1,y:y1},{x:x0,y:y1}];
+  for(let i=0;i<4;i++) if(segsHit(a,b,c[i],c[(i+1)%4])) return true;
+  return false;
+}
+function edgeOK(a,b,skip){ // skip: Set индексов зон-исключений
+  for(let i=0;i<ZONES.length;i++){
+    if(skip&&skip.has(i))continue;
+    if(segRectHit(a,b,ZONES[i]))return false;
+  }
+  return true;
+}
+function roadFrac(a,b){ // доля длины отрезка внутри полосы дороги
+  if(a.x===b.x) return (a.x>ROAD.x0&&a.x<ROAD.x1)?1:0;
+  let t0=(ROAD.x0-a.x)/(b.x-a.x), t1=(ROAD.x1-a.x)/(b.x-a.x);
+  if(t0>t1)[t0,t1]=[t1,t0];
+  return Math.max(0,Math.min(1,t1)-Math.max(0,t0));
+}
+function edgeMoney(a,b,kRoad=K_ROAD){
+  const L=dist(a,b), f=roadFrac(a,b);
+  return L*RATE_BASE*((1-f)+f*kRoad);
+}
+const scoreOf=(money,len)=>0.7*money/25e6+0.3*len/100;
+const edgeW=(a,b,kRoad)=>scoreOf(edgeMoney(a,b,kRoad),dist(a,b));
+
+/* ==================== узлы графа ==================== */
+function cornerNodes(){
+  const ns=[];
+  for(const z of ZONES.slice(0,BLD.length)){
+    for(const c of [{x:z.x,y:z.y},{x:z.x+z.w,y:z.y},{x:z.x+z.w,y:z.y+z.h},{x:z.x,y:z.y+z.h}]){
+      if(c.x>RIVER.x+RIVER.w+4 && c.x<930 && c.y>6 && c.y<614 &&
+         !ZONES.some(o=>o!==z && c.x>o.x+1&&c.x<o.x+o.w-1&&c.y>o.y+1&&c.y<o.y+o.h-1))
+        ns.push(c);
+    }
+  }
+  // техузлы-кандидаты на границах дороги
+  for(const y of [80,200,320,440,560]) ns.push({x:ROAD.x0,y},{x:ROAD.x1,y});
+  return ns;
+}
+function tieNodes(){
+  const t=CHAMBERS.map(c=>({...c,term:TIE_CHAMBER,kind:"камера"}));
+  for(let y=EXIST_Y0+40;y<EXIST_Y1;y+=70)
+    if(CHAMBERS.every(c=>Math.abs(c.y-y)>25))
+      t.push({x:EXIST_X,y,term:TIE_CHAMBER,kind:"труба"});
+  return t;
+}
+
+/* Дейкстра от точки ОКС до лучшей цели */
+function route(start, targets, skipZone, kRoad=K_ROAD){
+  const nodes=[{...start,start:true},...cornerNodes(),...targets];
+  const n=nodes.length, adj=[];
+  for(let i=0;i<n;i++)adj.push([]);
+  for(let i=0;i<n;i++)for(let j=i+1;j<n;j++){
+    const a=nodes[i],b=nodes[j];
+    if(a.term!==undefined&&b.term!==undefined)continue; // между целями не ходим
+    const skip=new Set(); if(a.start||b.start){ if(skipZone!=null)skip.add(skipZone); }
+    if(edgeOK(a,b,skip)){ const w=edgeW(a,b,kRoad); adj[i].push([j,w]); adj[j].push([i,w]); }
+  }
+  const D=Array(n).fill(1e18),P=Array(n).fill(-1),done=Array(n).fill(false);
+  D[0]=0; const settled=[];
+  for(;;){
+    let u=-1,best=1e17;
+    for(let i=0;i<n;i++)if(!done[i]&&D[i]<best){best=D[i];u=i;}
+    if(u<0)break; done[u]=true;
+    if(P[u]>=0)settled.push([nodes[P[u]],nodes[u]]);
+    for(const [v,w] of adj[u]) if(D[u]+w<D[v]){D[v]=D[u]+w;P[v]=u;}
+  }
+  let bi=-1,bs=1e18;
+  for(let i=0;i<n;i++) if(nodes[i].term!==undefined&&D[i]<1e17){
+    const s=D[i]+scoreOf(nodes[i].term,0);
+    if(s<bs){bs=s;bi=i;}
+  }
+  if(bi<0)return null;
+  const path=[]; for(let v=bi;v>=0;v=P[v])path.push(nodes[v]); path.reverse();
+  return {path, tie:nodes[bi], settled};
+}
+function samplesOnPath(path,step=34){ // точки врезки в построенную трубу
+  const out=[];
+  for(let i=0;i+1<path.length;i++){
+    const a=path[i],b=path[i+1],L=dist(a,b);
+    for(let d=step;d<L-6;d+=step)
+      out.push({x:a.x+(b.x-a.x)*d/L,y:a.y+(b.y-a.y)*d/L,term:NEW_CHAMBER_SMALL,kind:"новая сеть"});
+  }
+  for(const p of path.slice(1,-1)) out.push({x:p.x,y:p.y,term:NEW_CHAMBER_SMALL,kind:"новая сеть"});
+  return out;
+}
+/* «лесенка» по сетке для сравнения */
+function gridPath(start,goal){
+  const CS=20,W=Math.ceil(940/CS),H=Math.ceil(620/CS);
+  const blocked=(cx,cy)=>{const p={x:cx*CS+CS/2,y:cy*CS+CS/2};
+    return ZONES.some(z=>p.x>z.x&&p.x<z.x+z.w&&p.y>z.y&&p.y<z.y+z.h)};
+  const cell=p=>[Math.floor(p.x/CS),Math.floor(p.y/CS)];
+  const [sx,sy]=cell(start),[gx,gy]=cell(goal);
+  const key=(x,y)=>y*W+x, prev=new Map(), q=[[sx,sy]]; prev.set(key(sx,sy),null);
+  while(q.length){
+    const [x,y]=q.shift();
+    if(x===gx&&y===gy)break;
+    for(const [dx,dy] of [[1,0],[-1,0],[0,1],[0,-1]]){
+      const nx=x+dx,ny=y+dy;
+      if(nx<0||ny<0||nx>=W||ny>=H||prev.has(key(nx,ny))||blocked(nx,ny))continue;
+      prev.set(key(nx,ny),[x,y]); q.push([nx,ny]);
+    }
+  }
+  if(!prev.has(key(gx,gy)))return null;
+  const pts=[]; for(let c=[gx,gy];c;c=prev.get(key(c[0],c[1])))pts.push({x:c[0]*CS+CS/2,y:c[1]*CS+CS/2});
+  pts.reverse(); pts[0]=start; pts.push(goal);
+  return pts;
+}
+const pathLen=p=>{let L=0;for(let i=0;i+1<p.length;i++)L+=dist(p[i],p[i+1]);return L};
+const pathMoney=p=>{let m=0;for(let i=0;i+1<p.length;i++)m+=edgeMoney(p[i],p[i+1]);return m};
+
+/* ==================== расчёт сети ==================== */
+const NET={branches:[],chambers:[],techNodes:[]};
+(function build(){
+  let tieTargets=tieNodes();
+  for(const [i,o] of OKS.entries()){
+    const r=route(o.p,tieTargets,o.bld);
+    r.oks=o; NET.branches.push(r);
+    if(i===0){ NET.rootTie=r.tie; }
+    else NET.chambers.push({...r.tie,why:"врезка "+o.name});
+    tieTargets=tieTargets.concat(samplesOnPath(r.path));
+  }
+  // техузлы на границах дороги
+  for(const br of NET.branches)
+    for(let i=0;i+1<br.path.length;i++){
+      const a=br.path[i],b=br.path[i+1];
+      for(const rx of [ROAD.x0,ROAD.x1]){
+        if((a.x-rx)*(b.x-rx)<0){
+          const t=(rx-a.x)/(b.x-a.x);
+          NET.techNodes.push({x:rx,y:a.y+(b.y-a.y)*t});
+        }
+      }
+    }
+  // потоки и ДУ: делим ветви на кусочки, кусочки общих участков суммируют поток
+  const segs=new Map();
+  const skey=(a,b)=>{const k1=a.x.toFixed(1)+","+a.y.toFixed(1),k2=b.x.toFixed(1)+","+b.y.toFixed(1);
+    return k1<k2?k1+"|"+k2:k2+"|"+k1};
+  for(const br of NET.branches){
+    // путь ОКС → корень: сама ветвь + хвост ветви-родителя от точки врезки
+    let chain=[...br.path].reverse(); // от ОКС к врезке
+    let tie=br.tie;
+    while(tie&&tie.kind==="новая сеть"){
+      const host=NET.branches.find(b2=>b2!==br&&onPath(b2.path,tie));
+      if(!host)break;
+      chain=chain.concat(tailFrom(host.path,tie));
+      tie=host.tie;
+    }
+    for(let i=0;i+1<chain.length;i++){
+      const k=skey(chain[i],chain[i+1]);
+      const s=segs.get(k)||{a:chain[i],b:chain[i+1],flow:0};
+      s.flow+=br.oks.flow; segs.set(k,s);
+    }
+  }
+  function onPath(path,p){
+    for(let i=0;i+1<path.length;i++){
+      const a=path[i],b=path[i+1];
+      const t=((p.x-a.x)*(b.x-a.x)+(p.y-a.y)*(b.y-a.y))/(dist(a,b)**2);
+      if(t>-0.001&&t<1.001&&Math.hypot(a.x+(b.x-a.x)*t-p.x,a.y+(b.y-a.y)*t-p.y)<0.5)return true;
+    }
+    return false;
+  }
+  function tailFrom(path,p){ // часть path от точки p до конца (до врезки)
+    const out=[];
+    for(let i=0;i+1<path.length;i++){
+      const a=path[i],b=path[i+1];
+      const t=((p.x-a.x)*(b.x-a.x)+(p.y-a.y)*(b.y-a.y))/(dist(a,b)**2);
+      if(t>-0.001&&t<1.001&&Math.hypot(a.x+(b.x-a.x)*t-p.x,a.y+(b.y-a.y)*t-p.y)<0.5){
+        out.push(p,...path.slice(i+1)); return out;
+      }
+    }
+    return out;
+  }
+  for(const s of segs.values()){
+    s.du=TABLE.find(r=>r[1]>=s.flow)[0];
+    s.rate=TABLE.find(r=>r[0]===s.du)[2];
+    s.len=dist(s.a,s.b);
+    s.road=roadFrac(s.a,s.b);
+    s.money=s.len*s.rate*((1-s.road)+s.road*K_ROAD);
+  }
+  NET.segs=[...segs.values()];
+  NET.pipeMoney=NET.segs.reduce((t,s)=>t+s.money,0);
+  NET.len=NET.segs.reduce((t,s)=>t+s.len,0);
+  NET.chamberMoney=NET.chambers.length*NEW_CHAMBER_SMALL;
+  NET.tieMoney=TIE_CHAMBER;
+  NET.total=NET.pipeMoney+NET.chamberMoney+NET.tieMoney;
+  NET.score=scoreOf(NET.total,NET.len);
+})();
+
+/* ==================== отрисовка ==================== */
+const NS="http://www.w3.org/2000/svg";
+const el=(t,at,parent)=>{const e=document.createElementNS(NS,t);
+  for(const k in at)e.setAttribute(k,at[k]); if(parent)parent.appendChild(e); return e};
+const pts=p=>p.map(q=>q.x+","+q.y).join(" ");
+const G=id=>document.getElementById(id);
+const fmtM=v=>(v/1e6).toLocaleString("ru-RU",{maximumFractionDigits:1})+" млн ₽";
+
+(function drawBase(){
+  const g=G("Lbase");
+  el("rect",{x:RIVER.x,y:RIVER.y,width:RIVER.w,height:RIVER.h,rx:8,fill:"var(--water)"},g);
+  el("text",{x:RIVER.x+RIVER.w/2,y:310,class:"lbl small",transform:`rotate(-90 ${RIVER.x+RIVER.w/2} 310)`,"text-anchor":"middle"},g).textContent="река";
+  const rd=el("rect",{x:ROAD.x0,y:0,width:ROAD.x1-ROAD.x0,height:620,fill:"var(--road)"},g);
+  el("line",{x1:(ROAD.x0+ROAD.x1)/2,y1:0,x2:(ROAD.x0+ROAD.x1)/2,y2:620,stroke:"var(--road-line)","stroke-width":2,"stroke-dasharray":"14 12"},g);
+  el("text",{x:(ROAD.x0+ROAD.x1)/2,y:606,class:"lbl small","text-anchor":"middle",transform:`rotate(-90 ${(ROAD.x0+ROAD.x1)/2} 600)`},g).textContent="автодорога";
+  for(const b of BLD) el("rect",{x:b.x,y:b.y,width:b.w,height:b.h,rx:3,class:"bld"},g);
+  el("polyline",{points:pts([{x:EXIST_X,y:EXIST_Y0},{x:EXIST_X,y:EXIST_Y1}]),class:"exist"},g);
+  el("text",{x:EXIST_X+14,y:300,class:"lbl small",transform:`rotate(-90 ${EXIST_X+14} 300)`,"text-anchor":"middle"},g).textContent="существующая теплосеть ДУ300";
+  for(const c of CHAMBERS){
+    el("circle",{cx:c.x,cy:c.y,r:7,fill:"var(--panel)",stroke:"var(--purple)","stroke-width":2.5},g);
+    el("text",{x:c.x+13,y:c.y+4,class:"lbl small"},g).textContent="камера";
+  }
+  const top=G("Ltop");
+  for(const o of OKS){
+    el("circle",{cx:o.p.x,cy:o.p.y,r:5.5,fill:"var(--ink)"},top);
+    el("text",{x:o.p.x,y:o.p.y-12,class:"lbl","text-anchor":"middle","font-weight":600},top).textContent=o.name;
+    el("text",{x:o.p.x,y:o.p.y+22,class:"lbl mono","text-anchor":"middle",fill:"var(--muted)"},top).textContent=o.flow+" т/ч";
+  }
+})();
+(function drawZones(){
+  const g=G("Lzones");
+  for(const z of ZONES.slice(0,BLD.length)) el("rect",{x:z.x,y:z.y,width:z.w,height:z.h,rx:6,class:"zone"},g);
+  el("rect",{x:ROAD.x0-6,y:0,width:ROAD.x1-ROAD.x0+12,height:620,class:"zone"},g);
+  el("text",{x:230,y:56,class:"lbl small"},g).textContent="запретная зона: отступ + полгабарита труб";
+})();
+(function drawGraph(){
+  const g=G("Lgraph"), nodes=cornerNodes();
+  for(let i=0;i<nodes.length;i++)for(let j=i+1;j<nodes.length;j++)
+    if(dist(nodes[i],nodes[j])<330&&edgeOK(nodes[i],nodes[j]))
+      el("line",{x1:nodes[i].x,y1:nodes[i].y,x2:nodes[j].x,y2:nodes[j].y,class:"gedge"},g);
+  for(const p of nodes) el("circle",{cx:p.x,cy:p.y,r:2.6,class:"gnode"},g);
+})();
+const school=NET.branches[0];
+(function drawExplore(){
+  const g=G("Lexplore");
+  school.settled.slice(0,140).forEach(([a,b],i)=>{
+    const L=dist(a,b);
+    const ln=el("line",{x1:a.x,y1:a.y,x2:b.x,y2:b.y,class:"exp",
+      "stroke-dasharray":L,"stroke-dashoffset":L},g);
+    ln.dataset.delay=i*26;
+  });
+})();
+(function drawCompare(){
+  const g=G("Lcompare");
+  const goal=school.tie, start=school.oks.p;
+  el("line",{x1:start.x,y1:start.y,x2:goal.x,y2:goal.y,class:"path-bad"},g);
+  el("text",{x:(start.x+goal.x)/2-10,y:(start.y+goal.y)/2-8,class:"lbl",fill:"var(--bad)","font-weight":600},g).textContent="✕ нарушает отступы";
+  const gp=gridPath(start,goal);
+  if(gp) el("polyline",{points:pts(gp),class:"path-grid"},g);
+})();
+(function drawPaths(){
+  const g=G("Lpaths");
+  el("polyline",{points:pts(school.path),class:"path-main","stroke-width":4},g);
+  const t=school.tie;
+  el("circle",{cx:t.x,cy:t.y,r:8,fill:"var(--accent)"},g);
+})();
+(function drawShared(){
+  const g=G("Lshared");
+  for(const br of NET.branches.slice(1))
+    el("polyline",{points:pts(br.path),class:"path-main","stroke-width":4},g);
+  for(const c of NET.chambers){
+    el("circle",{cx:c.x,cy:c.y,r:6,fill:"var(--accent)",stroke:"var(--panel)","stroke-width":2},g);
+    el("text",{x:c.x+10,y:c.y-8,class:"lbl small"},g).textContent="новая камера";
+  }
+})();
+(function drawDiam(){
+  const g=G("Ldiam");
+  el("rect",{x:0,y:0,width:940,height:620,fill:"var(--bg)",opacity:0.0},g);
+  const wOf=du=>({80:2.5,100:3.2,125:4,150:5,200:6.2})[du]||4;
+  const seen=new Set();
+  for(const s of NET.segs){
+    el("line",{x1:s.a.x,y1:s.a.y,x2:s.b.x,y2:s.b.y,class:"path-main","stroke-width":wOf(s.du),
+      "stroke-dasharray":s.road>0?"8 5":"none"},g);
+    if(s.len>60&&!seen.has(s.du+"-"+(s.flow|0))){
+      seen.add(s.du+"-"+(s.flow|0));
+      const mx=(s.a.x+s.b.x)/2,my=(s.a.y+s.b.y)/2;
+      const r=el("rect",{x:mx-34,y:my-24,width:68,height:16,rx:8,fill:"var(--accent)"},g);
+      el("text",{x:mx,y:my-12,class:"tag","text-anchor":"middle"},g).textContent="ДУ"+s.du+" · "+s.flow+" т/ч";
+    }
+  }
+  for(const tn of NET.techNodes)
+    el("circle",{cx:tn.x,cy:tn.y,r:4,fill:"var(--panel)",stroke:"var(--accent)","stroke-width":2},g);
+})();
+
+/* ==================== режим с глубиной ==================== */
+const OUR_H=0.65, NORMAL=3.0, MIN_TOP=0.7, SLOPE=0.1;
+const CROSS=[ // пересекаемые коммуникации на восточном плече магистрали школы
+  {d:40, label:"кабель",     top:2.7, size:0.2, clr:0.5, alongW:0.2, color:"#2f8fe0"},
+  {d:100,label:"газопровод", top:2.8, size:0.4, clr:0.2, alongW:0.4, color:"#e08a00"},
+  {d:170,label:"коллектор",  top:1.4, size:2.2, clr:0.5, alongW:2.0, color:"var(--muted)", yaml:true},
+];
+// восточное плечо: часть пути школы после дороги
+const eastLeg=(()=>{
+  const p=school.path, out=[];
+  for(let i=0;i<p.length;i++) if(p[i].x>=ROAD.x1-1) out.push(p[i]);
+  // добавить точку выхода из дороги в начало
+  for(let i=0;i+1<p.length;i++){
+    const a=p[i],b=p[i+1];
+    if((a.x-ROAD.x1)*(b.x-ROAD.x1)<0){
+      const t=(ROAD.x1-a.x)/(b.x-a.x);
+      out.unshift({x:ROAD.x1,y:a.y+(b.y-a.y)*t}); break;
+    }
+  }
+  return out;
+})();
+const legLen=pathLen(eastLeg);
+function legPoint(d){ // точка и направление на плече по дистанции d
+  let acc=0;
+  for(let i=0;i+1<eastLeg.length;i++){
+    const a=eastLeg[i],b=eastLeg[i+1],L=dist(a,b);
+    if(acc+L>=d){const t=(d-acc)/L;
+      return {x:a.x+(b.x-a.x)*t,y:a.y+(b.y-a.y)*t,dx:(b.x-a.x)/L,dy:(b.y-a.y)/L};}
+    acc+=L;
+  }
+  const a=eastLeg[eastLeg.length-2],b=eastLeg[eastLeg.length-1],L=dist(a,b);
+  return {x:b.x,y:b.y,dx:(b.x-a.x)/L,dy:(b.y-a.y)/L};
+}
+// позиции пересечений — доли длины плеча (устойчиво к геометрии маршрута)
+const PL=Math.min(legLen,240);
+CROSS[0].d=Math.round(PL*0.20);
+CROSS[1].d=Math.round(PL*0.50);
+CROSS[2].d=Math.round(PL*0.78);
+// профиль: для каждого пересечения окно и целевая глубина верха
+for(const c of CROSS){
+  const over=c.top-c.clr-OUR_H, under=c.top+c.size+c.clr;
+  c.depth=(over>=MIN_TOP)?over:under;          // над — если физически можно, иначе под
+  c.under=c.depth===under;
+  c.k=c.depth>NORMAL?1+0.1*(c.depth-NORMAL):1; // Kгл
+  c.halfW=c.alongW/2+2;                        // границы спецучастка ±2 м
+  c.ramp=Math.abs(NORMAL-c.depth)/SLOPE;
+}
+(function drawCross(){ // пересечения на плане
+  const g=G("Lcross");
+  for(const c of CROSS){
+    const p=legPoint(c.d), nx=-p.dy, ny=p.dx;
+    el("line",{x1:p.x-nx*26,y1:p.y-ny*26,x2:p.x+nx*26,y2:p.y+ny*26,
+      stroke:c.color,"stroke-width":3,"stroke-dasharray":c.yaml?"5 4":"none"},g);
+    el("text",{x:p.x+nx*32,y:p.y+ny*32+4,class:"lbl small","text-anchor":"middle"},g)
+      .textContent=c.label;
+  }
+})();
+(function drawProfile(){
+  const svg=G("profile");
+  const X0=64,X1=908,Y0=34,SC=(X1-X0)/PL,VS=38; // px на метр глубины
+  const xx=d=>X0+d*SC, yy=h=>Y0+h*VS;
+  el("rect",{x:0,y:0,width:940,height:260,fill:"var(--panel)"},svg);
+  el("text",{x:X0,y:20,class:"lbl","font-weight":600},svg)
+    .textContent="Продольный профиль магистрали (восточное плечо, вертикальный масштаб увеличен)";
+  // земля и ось глубин
+  el("line",{x1:X0-10,y1:yy(0),x2:X1,y2:yy(0),stroke:"var(--ink)","stroke-width":2},svg);
+  el("text",{x:X1+2,y:yy(0)+4,class:"lbl small"},svg).textContent="земля";
+  for(let h=1;h<=5;h++){
+    el("line",{x1:X0-6,y1:yy(h),x2:X1,y2:yy(h),stroke:"var(--line)","stroke-width":1},svg);
+    el("text",{x:X0-12,y:yy(h)+4,class:"lbl mono","text-anchor":"end"},svg).textContent=h+" м";
+  }
+  // профиль верха габарита: плато + рампы
+  const bp=[{d:0,h:NORMAL}];
+  for(const c of CROSS.sort((a,b)=>a.d-b.d)){
+    bp.push({d:c.d-c.halfW-c.ramp,h:NORMAL},{d:c.d-c.halfW,h:c.depth,tech:1},
+            {d:c.d+c.halfW,h:c.depth,tech:1},{d:c.d+c.halfW+c.ramp,h:NORMAL});
+  }
+  bp.push({d:PL,h:NORMAL});
+  // лента трубы
+  const topPts=bp.map(p=>xx(p.d)+","+yy(p.h)).join(" ");
+  const botPts=[...bp].reverse().map(p=>xx(p.d)+","+yy(p.h+OUR_H)).join(" ");
+  el("polygon",{points:topPts+" "+botPts,fill:"var(--accent-soft)",stroke:"var(--accent)","stroke-width":2.5},svg);
+  el("text",{x:xx(8),y:yy(NORMAL)-8,class:"lbl small"},svg).textContent="обычная глубина: верх на 3,0 м";
+  // пересекаемые коммуникации
+  for(const c of CROSS){
+    el("rect",{x:xx(c.d)-Math.max(c.alongW*SC/2,5),y:yy(c.top),
+      width:Math.max(c.alongW*SC,10),height:c.size*VS,fill:c.color,rx:2,
+      "stroke-dasharray":c.yaml?"4 3":"none",stroke:c.yaml?"var(--ink)":"none"},svg);
+    el("text",{x:xx(c.d),y:yy(c.top)+(c.under?-8:c.size*VS+14),class:"lbl small","text-anchor":"middle"},svg)
+      .textContent=c.label+(c.yaml?" (тип из YAML)":"");
+    // просвет
+    const gy=c.under?[yy(c.top+c.size),yy(c.depth)]:[yy(c.depth+OUR_H),yy(c.top)];
+    el("line",{x1:xx(c.d)+16,y1:gy[0],x2:xx(c.d)+16,y2:gy[1],stroke:"var(--ok)","stroke-width":1.5},svg);
+    el("text",{x:xx(c.d)+21,y:(gy[0]+gy[1])/2+3,class:"lbl mono",fill:"var(--ok)"},svg)
+      .textContent=c.clr.toLocaleString("ru-RU");
+    if(c.k>1){
+      el("text",{x:xx(c.d),y:yy(c.depth+OUR_H)+18,class:"lbl mono","text-anchor":"middle",fill:"var(--accent)"},svg)
+        .textContent="Kгл = "+c.k.toFixed(2);
+    }
+  }
+  // техузлы на изломах
+  for(const p of bp) if(p.tech||Math.abs(p.h-NORMAL)<1e-9&&p.d>0&&p.d<PL)
+    el("circle",{cx:xx(p.d),cy:yy(p.h),r:3.5,fill:"var(--panel)",stroke:"var(--accent)","stroke-width":2},svg);
+  const r0=CROSS[0];
+  el("text",{x:xx(r0.d-r0.halfW-r0.ramp/2),y:yy((NORMAL+r0.depth)/2)-6,class:"lbl small"},svg)
+    .textContent="уклон ≤ 0,1";
+})();
+
+/* ==================== шаги ==================== */
+const cmpBest={money:pathMoney(school.path)+TIE_CHAMBER,len:pathLen(school.path)};
+const cmpGrid=(()=>{const p=gridPath(school.oks.p,school.tie);
+  return p?{money:pathMoney(p)+TIE_CHAMBER,len:pathLen(p)}:null})();
+const STEPS=[
+ {t:"Город и задача",layers:[],
+  b:`<p>Учебный квартал: десять зданий, река, автодорога и существующая теплосеть
+     справа. Три здания ждут тепло — у каждого своя точка подключения и расход.</p>
+     <p class="note">Настоящий сервис получает такой же город в GeoJSON, только зданий — тысячи.</p>`,
+  chips:[["sw",'var(--purple)','dash',"существующая сеть · камеры"],["dot","var(--ink)","", "точки подключения ОКС"]]},
+ {t:"Запретные зоны",layers:["Lzones"],
+  b:`<p>Каждое препятствие «раздувается»: к контуру прибавляется нормативный отступ
+     (5–9 м по диаметру) плюс половина ширины пары труб. Внутрь пунктира ось трассы
+     заходить не может.</p>
+     <p>Дорога — препятствие особого рода: её можно пересечь, но только прямым
+     участком под углом ≥ 45°, и метр там дороже в 1,6 раза.</p>`,
+  chips:[["sw","var(--zone-line)","dash","запретная зона"],["sw","var(--road-line)","","спецпроход: K = 1,6"]]},
+ {t:"Паутина возможных ходов",layers:["Lzones","Lgraph"],
+  b:`<p>Ключевая идея: оптимальный обход всегда идёт по прямой от угла одного
+     препятствия до угла другого — как нитка, натянутая между колышками.</p>
+     <p>Соединяем углы запретных зон всеми допустимыми прямыми — получается
+     <b>граф видимости</b>: сотни проверенных ходов, из которых можно собирать маршрут.
+     Каждое ребро уже прошло проверку отступов и правил спецпроходов.</p>`,
+  chips:[["sw","var(--graph)","","допустимое ребро графа"],["dot","var(--node)","","вершина — угол зоны"]]},
+ {t:"Дешёвый, а не короткий",layers:["Lzones","Lexplore","Lcompare","Lpaths"],explore:true,
+  b:`<p>По паутине бежит поиск пути (A*). Цена хода — не метры, а <b>вклад в оценку
+     жюри</b>: стоимость метра трубы с надбавками плюс нормированная длина.</p>
+     <p>Школа (30 т/ч) подключается первой. Сравните три маршрута:</p>`,
+  chips:[["sw","var(--bad)","dash",`напрямую — нельзя <b>✕</b>`],
+         ["sw","var(--muted)","dash",`«лесенка» по сетке — ${cmpGrid?fmtM(cmpGrid.money)+" · "+Math.round(cmpGrid.len)+" м":"—"}`],
+         ["sw","var(--accent)","",`граф видимости — <b>${fmtM(cmpBest.money)}</b> · ${Math.round(cmpBest.len)} м`]]},
+ {t:"Соседи делят трубу",layers:["Lzones","Lpaths","Lshared"],
+  b:`<p>Остальные здания подключаются по очереди, и каждому доступна не только
+     существующая сеть, но и <b>уже построенная труба школы</b>. Врезался рядом —
+     сэкономил сотни метров магистрали.</p>
+     <p>В точке врезки ставится новая камера. Так и возникают общие магистрали —
+     главный источник экономии (на конкурсном наборе — в 3,1 раза против
+     раздельной прокладки).</p>
+     <p class="note">В бою порядок подключения перебирается семью способами, и каждый
+     ОКС потом пробуют переподключить заново (1-opt) — берётся лучший план.</p>`,
+  chips:[["dot","var(--accent)","","новая камера в точке врезки"]]},
+ {t:"Диаметры по потоку",layers:["Ldiam"],
+  b:`<p>Расход трубы — сумма расходов всех зданий «ниже по течению»: труба толстеет
+     к месту врезки, как река от притоков. Диаметр берётся из таблицы: минимальный,
+     который пропустит поток и не превысит предельную длину для своего калибра.</p>
+     <p class="note">Пунктиром — спецпроход под дорогой, на его границах — технические узлы.</p>`,
+  chips:[["sw","var(--accent)","",`ДУ80 · 12 т/ч → тонкая`],["swW","var(--accent)","",`ДУ150 · 60 т/ч → толстая`]]},
+ {t:"Смета и оценка",layers:["Ldiam"],est:true,
+  b:`<p>Финал — честная смета: каждый участок по своей цене за метр (с K за
+     спецпроходы), камеры по диаметру, врезка в существующую камеру — фиксированные
+     5 млн. Не подключил здание — штраф 100 млн, поэтому сначала подключаем всех.</p>`,
+  chips:[]},
+ {t:"Режим с глубиной",layers:["Ldiam","Lcross"],profile:true,
+  b:`<p>Дополнительный режим достраивает <b>вертикальный профиль</b> вдоль тех же
+     маршрутов. Z-координаты не нужны: глубины коммуникаций условные, по типам
+     (кабель — 2,7 м, газ — 2,8 м), для новых типов задаются YAML-справочником.</p>
+     <p>Каждое пересечение — «окно» допустимых глубин: над препятствием или под ним
+     с нормативным просветом. Труба идёт на обычных 3,0 м, а у пересечений
+     поднимается или ныряет: полка + рампы с уклоном не круче 0,1, на изломах —
+     технические узлы. Над кабелем и газом проходим сверху (бесплатно), а вот под
+     коллектор приходится нырять — заглубление ниже 3 м оплачивается
+     коэффициентом <b>K</b><span style="font-size:.8em">гл</span> = 1 + 0,1·(h − 3).</p>
+     <p class="note">Результат — отдельный файл с depth_start/depth_end у каждого
+     участка и собственным ранжированием вариантов.</p>`,
+  chips:[["sw","#2f8fe0","","кабель · просвет 0,5 м"],
+         ["sw","#e08a00","","газопровод · просвет 0,2 м"],
+         ["sw","var(--muted)","dash","коллектор — тип из YAML-справочника"],
+         ["dot","var(--accent)","","техузел на изломе профиля"]]},
+];
+
+const dots=G("dots");
+STEPS.forEach((s,i)=>{
+  const b=document.createElement("button");
+  b.textContent=i+1; b.setAttribute("aria-label","Шаг "+(i+1));
+  b.onclick=()=>go(i); dots.appendChild(b);
+});
+let cur=-1;
+function chipHTML(kind,color,mod,label){
+  if(kind==="dot")return `<div class="chip"><span class="sw" style="border:none;width:12px;height:12px;border-radius:50%;background:${color}"></span><span>${label}</span></div>`;
+  const w=kind==="swW"?"border-top-width:6px;":"";
+  return `<div class="chip"><span class="sw ${mod}" style="border-top-color:${color};${w}"></span><span>${label}</span></div>`;
+}
+function go(i){
+  cur=Math.max(0,Math.min(STEPS.length-1,i));
+  const s=STEPS[cur];
+  G("stepEyebrow").textContent=`Шаг ${cur+1} из ${STEPS.length}`;
+  G("stepTitle").textContent=s.t;
+  G("stepBody").innerHTML=s.b;
+  G("stepChips").innerHTML=s.chips.map(c=>chipHTML(...c)).join("");
+  for(const id of ["Lzones","Lgraph","Lexplore","Lcompare","Lpaths","Lshared","Ldiam","Lcross"])
+    G(id).classList.toggle("on",s.layers.includes(id));
+  G("profile").hidden=!s.profile;
+  [...dots.children].forEach((d,j)=>d.classList.toggle("cur",j===cur));
+  G("btnPrev").disabled=cur===0; G("btnNext").disabled=cur===STEPS.length-1;
+  const est=G("estimate"); est.classList.toggle("on",!!s.est);
+  if(s.est)renderEstimate();
+  if(s.explore)playExplore();
+}
+function playExplore(){
+  const lines=G("Lexplore").querySelectorAll("line");
+  const reduce=matchMedia("(prefers-reduced-motion: reduce)").matches;
+  lines.forEach(ln=>{
+    ln.style.transition="none"; ln.setAttribute("stroke-dashoffset",ln.getAttribute("stroke-dasharray"));
+    void ln.getBoundingClientRect();
+    if(reduce){ln.setAttribute("stroke-dashoffset",0);return;}
+    ln.style.transition=`stroke-dashoffset .4s linear ${ln.dataset.delay}ms`;
+    ln.setAttribute("stroke-dashoffset",0);
+  });
+}
+function renderEstimate(){
+  const byDu=new Map();
+  for(const s of NET.segs){
+    const e=byDu.get(s.du)||{len:0,money:0}; e.len+=s.len;e.money+=s.money;byDu.set(s.du,e);
+  }
+  let rows="";
+  for(const [du,e] of [...byDu.entries()].sort((a,b)=>a[0]-b[0]))
+    rows+=`<div class="row"><span>Трубы ДУ${du} · ${Math.round(e.len)} м</span><span>${fmtM(e.money)}</span></div>`;
+  rows+=`<div class="row"><span>Новые камеры × ${NET.chambers.length}</span><span>${fmtM(NET.chamberMoney)}</span></div>`;
+  rows+=`<div class="row"><span>Врезка в существующую камеру</span><span>${fmtM(NET.tieMoney)}</span></div>`;
+  rows+=`<div class="row total"><span>Итого · ${Math.round(NET.len)} м</span><span>${fmtM(NET.total)}</span></div>`;
+  rows+=`<div class="row score"><span>Показатель S</span><span>${NET.score.toFixed(2)}</span></div>`;
+  rows+=`<div class="formula">S = 0,7·(C / 25 млн) + 0,3·(L / 100)<br>= 0,7·${(NET.total/25e6).toFixed(2)} + 0,3·${(NET.len/100).toFixed(2)} = <b>${NET.score.toFixed(2)}</b></div>`;
+  G("estimate").innerHTML=rows;
+}
+G("btnPrev").onclick=()=>go(cur-1);
+G("btnNext").onclick=()=>go(cur+1);
+addEventListener("keydown",e=>{
+  if(e.key==="ArrowRight")go(cur+1);
+  if(e.key==="ArrowLeft")go(cur-1);
+});
+go(0);
+</script>
+
+</body>
+</html>
