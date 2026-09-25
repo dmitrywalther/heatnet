@@ -1,0 +1,30 @@
+# Продакшен-надстройка для публичного стенда на небольшом VPS (2+ ГБ ОЗУ).
+# Использование (из корня репозитория):
+#   DOMAIN=heatnet.1-2-3-4.nip.io docker compose \
+#       -f docker-compose.yml -f deploy/docker-compose.prod.yml up -d --build
+services:
+  app:
+    environment:
+      JAVA_OPTS: "-Xmx1400m"
+    restart: unless-stopped
+
+  db:
+    restart: unless-stopped
+
+  # реверс-прокси с автоматическим TLS (Let's Encrypt)
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on:
+      - app
+
+volumes:
+  caddy_data:

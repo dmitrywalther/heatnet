@@ -12,5 +12,8 @@ WORKDIR /app
 COPY --from=build /build/target/heatnet-1.0.0.jar app.jar
 RUN mkdir -p /app/data
 ENV HEATNET_STORAGE=/app/data
+# по умолчанию — под машину проверки из ТЗ (16 ГБ ОЗУ);
+# на небольшом VPS переопределяется через JAVA_OPTS (см. deploy/)
+ENV JAVA_OPTS="-Xmx12g"
 EXPOSE 8080
-ENTRYPOINT ["java", "-Xmx12g", "-jar", "app.jar"]
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar app.jar"]
