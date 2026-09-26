@@ -560,6 +560,9 @@
 
     const b = geomBounds(baseFeatures.length ? baseFeatures : resultFeatures);
     if (!b) return;
+    // текущий вид в старой проекции — для анимированного «подлёта» к данным
+    const prev = (proj.ready && vb)
+      ? { vb: { ...vb }, lat0: proj.lat0, lon0: proj.lon0 } : null;
     proj.lat0 = (b.minLat + b.maxLat) / 2;
     proj.lon0 = b.minLon;
     proj.ready = true;
@@ -571,8 +574,17 @@
     tileCache.clear();
     tileG = el('g', { opacity: 0.55 });   // подложка OSM — самым нижним слоем
     const world = { x: -40, y: minY - 40, w: maxX + 80, h: (maxY - minY) + 80 };
-    if (!vb) vb = { ...world };
     fitAspect(world);
+    const target = { ...vb };
+    if (prev) {
+      // старый вид в координатах новой проекции
+      const oldFrom = (x, y) => [
+        x / (proj.k * Math.cos(prev.lat0 * Math.PI / 180)) + prev.lon0,
+        prev.lat0 - y / proj.k];
+      const [x1, y1] = toXY(...oldFrom(prev.vb.x, prev.vb.y));
+      const [x2, y2] = toXY(...oldFrom(prev.vb.x + prev.vb.w, prev.vb.y + prev.vb.h));
+      vb = { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+    }
 
     // подложка
     baseFeatures.forEach(f => {
@@ -641,7 +653,35 @@
         el('circle', { cx: x, cy: y, r: 5, fill: '#310F53', stroke: '#fff', 'stroke-width': 1.2 });
       });
 
-    applyVb();
+    // плавный «подлёт» к данным, если вид ощутимо меняется
+    const far = prev && (Math.abs(Math.log(vb.w / target.w)) > 0.3
+        || Math.hypot(vb.x - target.x, vb.y - target.y) > target.w);
+    if (far) flyTo(target); else { vb = target; applyVb(); }
+  }
+
+  // ---------- анимация вида ----------
+  let flyAnim = null;
+  function cancelFly() { if (flyAnim) { cancelAnimationFrame(flyAnim); flyAnim = null; } }
+  function flyTo(target) {
+    cancelFly();
+    if (document.hidden) { vb = { ...target }; applyVb(); return; }  // rAF заморожен в фоне
+    const from = { ...vb }, dur = 1400, t0 = performance.now();
+    const cx0 = from.x + from.w / 2, cy0 = from.y + from.h / 2;
+    const cx1 = target.x + target.w / 2, cy1 = target.y + target.h / 2;
+    const ease = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    let lastTiles = 0;
+    const step = now => {
+      const t = Math.min(1, (now - t0) / dur), e = ease(t);
+      const w = from.w * Math.pow(target.w / from.w, e);   // масштаб — экспоненциально
+      const h = from.h * Math.pow(target.h / from.h, e);
+      const cx = cx0 + (cx1 - cx0) * e, cy = cy0 + (cy1 - cy0) * e;
+      vb = { x: cx - w / 2, y: cy - h / 2, w, h };
+      svg.setAttribute('viewBox', vb.x + ' ' + vb.y + ' ' + vb.w + ' ' + vb.h);
+      if (now - lastTiles > 220) { lastTiles = now; updateTiles(); }
+      if (t < 1) flyAnim = requestAnimationFrame(step);
+      else { flyAnim = null; vb = { ...target }; applyVb(); }
+    };
+    flyAnim = requestAnimationFrame(step);
   }
 
   // ---------- tooltip ----------
@@ -681,6 +721,7 @@
   }
   let dragState = null;
   svg.addEventListener('pointerdown', e => {
+    cancelFly();
     dragState = { x: e.clientX, y: e.clientY };
     svg.classList.add('drag'); svg.setPointerCapture(e.pointerId);
   });
@@ -696,6 +737,7 @@
   svg.addEventListener('wheel', e => {
     e.preventDefault();
     if (!vb) return;
+    cancelFly();
     const k = e.deltaY > 0 ? 1.15 : 1 / 1.15;
     const r = svg.getBoundingClientRect();
     const mx = vb.x + (e.clientX - r.left) / r.width * vb.w;
