@@ -174,6 +174,34 @@
   }
   #osm-attr[hidden] { display: none; }
   #osm-attr a { color: var(--muted); }
+  #draw-btn {
+    position: absolute; right: 12px; top: 48px; z-index: 4; font-size: 12px;
+    padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line);
+    background: rgba(255,255,255,.94); cursor: pointer;
+  }
+  #draw-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  #draw-btn[hidden] { display: none; }
+  #draw-hint {
+    position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 4;
+    background: rgba(43,33,64,.88); color: #fff; font-size: 12px;
+    padding: 6px 14px; border-radius: 8px;
+  }
+  #draw-hint[hidden] { display: none; }
+  #draw-form {
+    position: absolute; right: 12px; top: 86px; z-index: 5; width: 230px;
+    background: rgba(255,255,255,.97); border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px; font-size: 12.5px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  #draw-form[hidden] { display: none; }
+  #draw-form .df-title { font-weight: 600; }
+  #draw-form select, #draw-form input {
+    width: 100%; font: 12px Consolas, monospace; padding: 5px 6px;
+    border: 1px solid var(--line); border-radius: 5px; color: var(--ink);
+  }
+  #draw-form label { display: flex; flex-direction: column; gap: 3px; color: var(--muted); }
+  #draw-form .df-btns { display: flex; gap: 6px; justify-content: flex-end; }
+  #draw-form .df-btns button { font-size: 12px; padding: 6px 10px; }
   #hint {
     position: absolute; inset: 0; display: flex; align-items: center;
     justify-content: center; color: var(--muted); font-size: 15px; z-index: 1;
@@ -247,6 +275,17 @@
     <div id="hint"><span>Загрузите входной GeoJSON и запустите расчёт —<br>карта района и варианты трассировки появятся здесь</span></div>
     <div id="tooltip"></div>
     <label id="basemap" hidden><input type="checkbox" id="basemap-cb" checked>Карта-подложка</label>
+    <button id="draw-btn" hidden title="Нарисовать полигон ограничения на карте">✏ Добавить объект</button>
+    <div id="draw-hint" hidden>Кликайте вершины полигона · <b>Enter</b> — завершить · <b>Esc</b> — отмена</div>
+    <div id="draw-form" hidden>
+      <div class="df-title">Новый объект ограничения</div>
+      <label>тип <select id="df-type"></select></label>
+      <input id="df-custom" placeholder="имя типа (латиницей)" pattern="[a-z][a-z0-9_]*" hidden>
+      <div class="df-btns">
+        <button class="ghost" id="df-cancel">Отмена</button>
+        <button class="primary" id="df-ok">Добавить</button>
+      </div>
+    </div>
     <div id="osm-attr" hidden>© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors</div>
     <div id="legend" hidden>
       <div class="row"><svg width="30" height="12"><line x1="2" y1="6" x2="28" y2="6" stroke="#FF0053" stroke-width="3"/></svg>новая сеть (пунктир — спецпроход)</div>
@@ -379,8 +418,11 @@
     $('run').disabled = false;
     drop.classList.add('armed');
     drop.innerHTML = '<b>' + escapeHtml(f.name) + '</b><br>нажмите, чтобы заменить';
+    inputModified = false;
+    setDrawMode(false);
+    $('draw-btn').hidden = true;
     if (f.size <= 64 * 1024 * 1024) {
-      f.text().then(t => { try { baseData = JSON.parse(t); renderInputStats(); drawAll(); } catch (e) { /* нарисуем после расчёта */ } });
+      f.text().then(t => { try { baseData = JSON.parse(t); renderInputStats(); drawAll(); $('draw-btn').hidden = false; } catch (e) { /* нарисуем после расчёта */ } });
     } else {
       status('Файл больше 64 МБ — подложка не отображается, результат будет показан', '');
     }
@@ -590,7 +632,13 @@
     $('results').hidden = true;
     modeData = { '2d': null, depth: null };
     const form = new FormData();
-    form.append('file', inputFile);
+    if (inputModified && baseData) {
+      // на карте добавлены объекты — отправляем изменённый набор
+      form.append('file', new Blob([JSON.stringify(baseData)],
+          { type: 'application/geo+json' }), inputFile.name);
+    } else {
+      form.append('file', inputFile);
+    }
     const rulesText = rulesYaml();
     if (rulesText) form.append('rules', new Blob([rulesText], { type: 'text/yaml' }), 'rules.yml');
     status('Загрузка файла…');
@@ -1013,9 +1061,94 @@
     svg.setAttribute('viewBox', vb.x + ' ' + vb.y + ' ' + vb.w + ' ' + vb.h);
     scheduleTiles();
   }
+  // ---------- рисование объекта-ограничения на карте ----------
+  let drawMode = false, drawPts = [], drawPreview = null, inputModified = false;
+  const drawBtn = $('draw-btn'), drawHint = $('draw-hint'), drawForm = $('draw-form');
+  function clientToVb(e) {
+    const r = svg.getBoundingClientRect();
+    return [vb.x + (e.clientX - r.left) / r.width * vb.w,
+            vb.y + (e.clientY - r.top) / r.height * vb.h];
+  }
+  function setDrawMode(on) {
+    drawMode = on; drawPts = [];
+    drawBtn.classList.toggle('active', on);
+    drawHint.hidden = !on;
+    drawForm.hidden = true;
+    if (drawPreview) { drawPreview.remove(); drawPreview = null; }
+    svg.style.cursor = on ? 'crosshair' : '';
+  }
+  drawBtn.addEventListener('click', () => setDrawMode(!drawMode));
+  function drawClick(e) {
+    drawPts.push(clientToVb(e));
+    if (!drawPreview) {
+      drawPreview = el('polygon', { fill: 'rgba(255,0,83,.15)', stroke: '#FF0053',
+        'stroke-width': 2, 'stroke-dasharray': '6 4' });
+    }
+    drawPreview.setAttribute('points', drawPts.map(p => p.join(',')).join(' '));
+  }
+  function finishDraw() {
+    // дубли вершин от двойного клика
+    drawPts = drawPts.filter((p, i) => !i || Math.hypot(p[0] - drawPts[i - 1][0], p[1] - drawPts[i - 1][1]) > 0.5);
+    if (drawPts.length < 3) { setDrawMode(false); return; }
+    // форма выбора типа: типы справочника + свой
+    const sel = $('df-type');
+    sel.innerHTML = '';
+    const types = rulesModel ? Object.keys(rulesModel.restrictions).filter(t => t !== 'unknown_default') : [];
+    for (const t of types) {
+      const o = document.createElement('option');
+      o.value = t; o.textContent = t + (RULE_RU[t] ? ' — ' + RULE_RU[t] : '');
+      sel.appendChild(o);
+    }
+    const custom = document.createElement('option');
+    custom.value = '__custom__'; custom.textContent = 'новый тип…';
+    sel.appendChild(custom);
+    sel.value = types.includes('metro') ? 'metro' : types[0] || '__custom__';
+    $('df-custom').hidden = sel.value !== '__custom__';
+    drawForm.hidden = false;
+    drawHint.hidden = true;
+  }
+  $('df-type').addEventListener('change', () => {
+    $('df-custom').hidden = $('df-type').value !== '__custom__';
+  });
+  $('df-cancel').addEventListener('click', () => setDrawMode(false));
+  $('df-ok').addEventListener('click', () => {
+    let type = $('df-type').value;
+    if (type === '__custom__') {
+      type = $('df-custom').value.trim().toLowerCase();
+      if (!/^[a-z][a-z0-9_]*$/.test(type)) { $('df-custom').reportValidity(); return; }
+      // новый тип сразу попадает в справочник — параметры правятся там
+      if (rulesModel && !rulesModel.restrictions[type]) {
+        rulesModel.restrictions[type] = { mode: 'forbidden', min_distance: 1.0, _new: true };
+        openTypes.add(type); renderRules();
+      }
+    }
+    const ring = drawPts.map(([x, y]) => {
+      const [lon, lat] = fromXY(x, y);
+      return [Math.round(lon * 1e9) / 1e9, Math.round(lat * 1e9) / 1e9];
+    });
+    ring.push(ring[0]);
+    const maxId = baseData.features.reduce((m, f) =>
+      typeof f.properties.id === 'number' ? Math.max(m, f.properties.id) : m, 0);
+    baseData.features.push({ type: 'Feature',
+      properties: { id: maxId + 1, object_type: 'restriction', restriction_type: type },
+      geometry: { type: 'Polygon', coordinates: [ring] } });
+    inputModified = true;
+    setDrawMode(false);
+    renderInputStats();
+    drawAll();
+    status('Объект «' + type + '» добавлен — пересчитайте варианты', '');
+  });
+  window.addEventListener('keydown', e => {
+    if (!drawMode) return;
+    if (e.key === 'Enter' && drawForm.hidden) finishDraw();
+    if (e.key === 'Escape') setDrawMode(false);
+  });
+  svg.addEventListener('dblclick', () => { if (drawMode && drawForm.hidden) finishDraw(); });
+
   let dragState = null;
   svg.addEventListener('pointerdown', e => {
     cancelFly();
+    if (drawMode) { if (drawForm.hidden) drawClick(e); return; }
     dragState = { x: e.clientX, y: e.clientY };
     svg.classList.add('drag'); svg.setPointerCapture(e.pointerId);
   });
