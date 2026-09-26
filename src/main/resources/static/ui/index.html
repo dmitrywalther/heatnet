@@ -120,6 +120,12 @@
     white-space: nowrap; }
   .bd-row .bd-track { height: 5px; background: var(--accent-soft); border-radius: 3px;
     margin-top: 3px; position: relative; }
+  .bd-row.expandable .bd-line { cursor: pointer; }
+  .bd-row .chev { color: var(--muted); font-size: 10px; margin-right: 4px; }
+  .bd-sub { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px;
+    margin: 4px 0 2px 14px; font-size: 11.5px; color: var(--muted); }
+  .bd-sub .v { font-family: Consolas, monospace; font-variant-numeric: tabular-nums;
+    text-align: right; white-space: nowrap; }
   .bd-row .bd-bar { position: absolute; top: 0; height: 5px; border-radius: 3px;
     background: var(--accent); }
   .bd-row.bd-base .bd-bar { background: var(--purple); }
@@ -707,48 +713,103 @@
     for (const [du, cap] of PIPE_CAPS) if (cap >= flow) return PIPE_RATES[du];
     return PIPE_RATES[1400];
   }
+  const bdOpen = new Set();       // раскрытые факторы (по подписи)
+  let bdItems = [];
   function renderBreakdown(g) {
     const box = $('breakdown'), rowsEl = $('bd-rows');
     const s = g && g.summary;
     if (!s) { box.hidden = true; return; }
+    const fmtLen = m => new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 }).format(m) + ' м';
     let base = 0, dia = 0, spec = 0, pipes = 0;
+    const byMinDu = new Map(), byUp = new Map(), specSegs = [];
     for (const f of g.features) {
       const p = f.properties;
       if (p.object_type !== 'heat_network') continue;
-      const rateMin = minRateForFlow(p.flow_tph), rateFact = PIPE_RATES[p.diameter] || rateMin;
+      const minDu = minDuForFlow(p.flow_tph);
+      const rateMin = PIPE_RATES[minDu], rateFact = PIPE_RATES[p.diameter] || rateMin;
       pipes += p.cost;
       base += p.length * rateMin;
       dia += p.length * (rateFact - rateMin);
-      if (p.laying_method === 'special') spec += p.cost - p.length * rateFact;
+      const bm = byMinDu.get(minDu) || { len: 0, money: 0 };
+      bm.len += p.length; bm.money += p.length * rateMin; byMinDu.set(minDu, bm);
+      if (p.diameter > minDu) {
+        const k = 'ДУ' + minDu + ' → ДУ' + p.diameter;
+        const bu = byUp.get(k) || { len: 0, money: 0 };
+        bu.len += p.length; bu.money += p.length * (rateFact - rateMin); byUp.set(k, bu);
+      }
+      if (p.laying_method === 'special')
+        specSegs.push([p.id + ' · ДУ' + p.diameter + ' · ' + fmtLen(p.length),
+                       p.cost - p.length * rateFact]);
     }
-    let resid = pipes - base - dia - spec; // Kгл в режиме глубины; в 2D — округления
+    let resid = pipes - base - dia - spec - specSegs.reduce((t, x) => t + x[1], 0);
+    spec = specSegs.reduce((t, x) => t + x[1], 0);
     if (Math.abs(resid) < 100000) { base += resid; resid = 0; }
     const total = Math.max(1, s.calculated_cost || 1);
-    const items = [['Трубы минимального по расходу ДУ', base, 'bd-base', false]];
-    if (dia > 1) items.push(['Магистральные диаметры (предельные длины)', dia, '', true]);
-    if (spec > 1) items.push(['Спецпроходы (Kспец)', spec, '', true]);
-    if (resid > 1) items.push(['Заглубление ниже 3 м (Kгл)', resid, '', true]);
+
+    const baseDet = [...byMinDu.entries()].sort((a, b) => a[0] - b[0])
+      .map(([du, v]) => ['ДУ' + du + ' · ' + fmtLen(v.len) + ' · ' + PIPE_RATES[du].toLocaleString('ru-RU') + ' ₽/м', v.money]);
+    const diaDet = [...byUp.entries()].sort()
+      .map(([k, v]) => [k + ' · ' + fmtLen(v.len), v.money]);
+    const chamDet = (() => {
+      const m = new Map();
+      for (const f of g.features) {
+        const p = f.properties;
+        if (p.object_type === 'heat_chamber') m.set(p.cost, (m.get(p.cost) || 0) + 1);
+      }
+      return [...m.entries()].sort((a, b) => a[0] - b[0])
+        .map(([cost, n]) => [n + ' × ' + fmtRub(cost), n * cost]);
+    })();
+    const tieDet = s.existing_chamber_tie_in_count
+      ? [[s.existing_chamber_tie_in_count + ' × ' + fmtRub(5000000), s.existing_chamber_tie_in_cost]] : [];
+    const penDet = (s.unconnected_oks_ids || []).map(id => ['ОКС ' + id + ': 100 млн + 500 тыс. × расход', null]);
+
+    bdItems = [{ label: 'Трубы минимального по расходу ДУ', value: base, cls: 'bd-base', det: baseDet }];
+    if (dia > 1) bdItems.push({ label: 'Магистральные диаметры (предельные длины)', value: dia, plus: 1, det: diaDet });
+    if (spec > 1) bdItems.push({ label: 'Спецпроходы (Kспец)', value: spec, plus: 1, det: specSegs });
+    if (resid > 1) bdItems.push({ label: 'Заглубление ниже 3 м (Kгл)', value: resid, plus: 1,
+      det: [['надбавка Kгл = 1 + 0,1·(h − 3) на заглублённых участках', null]] });
     if (s.chamber_construction_cost > 0)
-      items.push(['Новые тепловые камеры', s.chamber_construction_cost, '', true]);
+      bdItems.push({ label: 'Новые тепловые камеры', value: s.chamber_construction_cost, plus: 1, det: chamDet });
     if (s.existing_chamber_tie_in_cost > 0)
-      items.push(['Врезки в существующие камеры', s.existing_chamber_tie_in_cost, '', true]);
+      bdItems.push({ label: 'Врезки в существующие камеры', value: s.existing_chamber_tie_in_cost, plus: 1, det: tieDet });
     if (s.unconnected_penalty > 0)
-      items.push(['Штрафы за неподключённые ОКС', s.unconnected_penalty, '', true]);
+      bdItems.push({ label: 'Штрафы за неподключённые ОКС', value: s.unconnected_penalty, plus: 1, det: penDet });
+
     let offset = 0, html = '';
-    for (const [label, value, cls, plus] of items) {
+    bdItems.forEach((it, i) => {
       const left = Math.min(99.6, 100 * offset / total);
-      const w = Math.max(0.4, Math.min(100 - left, 100 * value / total));
-      html += '<div class="bd-row ' + cls + '"><div class="bd-line"><span>' + label
-        + '</span><span class="bd-val">' + (plus ? '+ ' : '') + fmtRub(value)
-        + '</span></div><div class="bd-track"><div class="bd-bar" style="left:'
-        + left.toFixed(2) + '%;width:' + w.toFixed(2) + '%"></div></div></div>';
-      offset += value;
-    }
+      const w = Math.max(0.4, Math.min(100 - left, 100 * it.value / total));
+      const open = bdOpen.has(it.label);
+      const hasDet = it.det && it.det.length;
+      html += '<div class="bd-row ' + (it.cls || '') + (hasDet ? ' expandable' : '') + '" data-i="' + i + '">'
+        + '<div class="bd-line">'
+        + '<span>' + (hasDet ? '<span class="chev">' + (open ? '▾' : '▸') + '</span>' : '') + it.label
+        + '</span><span class="bd-val">' + (it.plus ? '+ ' : '') + fmtRub(it.value) + '</span></div>'
+        + '<div class="bd-track"><div class="bd-bar" style="left:'
+        + left.toFixed(2) + '%;width:' + w.toFixed(2) + '%"></div></div>';
+      if (open && hasDet) {
+        html += '<div class="bd-sub">' + it.det.map(([l, v]) =>
+          '<span>' + l + '</span><span class="v">' + (v != null ? fmtRub(v) : '') + '</span>').join('') + '</div>';
+      }
+      html += '</div>';
+      offset += it.value;
+    });
     html += '<div class="bd-row bd-total"><div class="bd-line"><span>Итого</span>'
       + '<span class="bd-val">' + fmtRub(total) + '</span></div>'
       + '<div class="bd-track"></div></div>';
     rowsEl.innerHTML = html;
+    rowsEl.querySelectorAll('.bd-row.expandable .bd-line').forEach(line => {
+      line.addEventListener('click', () => {
+        const it = bdItems[+line.parentElement.dataset.i];
+        bdOpen.has(it.label) ? bdOpen.delete(it.label) : bdOpen.add(it.label);
+        renderBreakdown(g);
+      });
+    });
     box.hidden = false;
+  }
+  function minDuForFlow(flow) {
+    for (const [du, cap] of PIPE_CAPS) if (cap >= flow) return du;
+    return 1400;
   }
 
   // ---------- отрисовка ----------
