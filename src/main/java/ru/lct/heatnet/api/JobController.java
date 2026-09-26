@@ -98,7 +98,7 @@ public class JobController {
         FileSystemResource resource = new FileSystemResource(job.getResultPath());
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION,
-                        "attachment; filename=\"result-" + id + ".geojson\"")
+                        "attachment; filename=\"heatnet-result.geojson\"")
                 .contentType(MediaType.parseMediaType("application/geo+json"))
                 .body(resource);
     }
@@ -116,7 +116,7 @@ public class JobController {
         FileSystemResource resource = new FileSystemResource(job.getDepthResultPath());
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION,
-                        "attachment; filename=\"result-depth-" + id + ".geojson\"")
+                        "attachment; filename=\"heatnet-result-depth.geojson\"")
                 .contentType(MediaType.parseMediaType("application/geo+json"))
                 .body(resource);
     }
@@ -134,7 +134,7 @@ public class JobController {
         FileSystemResource resource = new FileSystemResource(job.getReportPath());
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION,
-                        "attachment; filename=\"report-" + id + ".pdf\"")
+                        "attachment; filename=\"heatnet-report.pdf\"")
                 .contentType(MediaType.APPLICATION_PDF)
                 .body(resource);
     }

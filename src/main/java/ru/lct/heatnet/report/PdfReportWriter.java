@@ -188,36 +188,13 @@ public class PdfReportWriter {
         legendLine();
         y -= 20;
 
-        heading("Структура стоимости");
+        costWaterfall(v);
         double baseCost = v.segments.stream().filter(s -> !s.special).mapToDouble(s -> s.cost).sum();
         double specialCost = v.segments.stream().filter(s -> s.special).mapToDouble(s -> s.cost).sum();
-        costBar("Обычные участки (" + count(v, false) + ")", baseCost, v.calculatedCost);
-        if (specialCost > 0) {
-            costBar("Специальные проходы (" + count(v, true) + ")", specialCost, v.calculatedCost);
-        }
-        if (v.chamberConstructionCost > 0) {
-            costBar("Новые тепловые камеры (" + v.chambers.size() + ")",
-                    v.chamberConstructionCost, v.calculatedCost);
-        }
-        if (v.existingChamberTieInCost > 0) {
-            costBar("Врезки в существующие камеры (" + v.existingChamberTieInCount + ")",
-                    v.existingChamberTieInCost, v.calculatedCost);
-        }
-        if (v.unconnectedPenalty > 0) {
-            costBar("Штрафы за неподключённые ОКС", v.unconnectedPenalty, v.calculatedCost);
-        }
-        y -= 4;
-        text(MARGIN, y, bold, 11, TEXT, "Итого: " + fmt(v.calculatedCost, 0) + " руб."
-                + "   ·   новая сеть " + fmt(v.newNetworkLength, 0) + " м");
-        y -= 14;
 
-        // --- интерпретация стоимости и таблица участков ---
+        // --- таблица участков ---
         newPage();
-        title("Вариант " + v.variantId + " — интерпретация стоимости и участки");
-        costWaterfall(v);
-        y -= 10;
-
-        heading("Участки новой сети");
+        title("Вариант " + v.variantId + " — участки новой сети");
         List<String[]> rows = new ArrayList<>();
         int idx = 1;
         for (VariantResult.Segment s : v.segments) {
@@ -455,7 +432,7 @@ public class PdfReportWriter {
                     offset, total, ACCENT, true);
         }
         ensureSpace(20);
-        text(MARGIN, y, bold, 10, TEXT, "Итого");
+        text(MARGIN, y, bold, 10, TEXT, "Итого · новая сеть " + fmt(v.newNetworkLength, 0) + " м");
         String amount = fmt(v.calculatedCost, 0) + " руб.";
         text(PAGE_W - MARGIN - width(bold, 10, amount), y, bold, 10, TEXT, amount);
         y -= 13;
@@ -482,22 +459,6 @@ public class PdfReportWriter {
         cs.fill();
         y -= 15;
         return offset + value;
-    }
-
-    private void costBar(String label, double value, double total) throws IOException {
-        ensureSpace(20);
-        text(MARGIN, y, regular, 10, TEXT, label);
-        String amount = fmt(value, 0) + " руб.";
-        text(PAGE_W - MARGIN - width(regular, 10, amount), y, regular, 10, TEXT, amount);
-        y -= 13;
-        float barW = (float) (CONTENT_W * Math.max(0.004, value / Math.max(1, total)));
-        cs.setNonStrokingColor(new Color(0xF3, 0xEC, 0xF8));
-        cs.addRect(MARGIN, y, CONTENT_W, 6);
-        cs.fill();
-        cs.setNonStrokingColor(ACCENT);
-        cs.addRect(MARGIN, y, barW, 6);
-        cs.fill();
-        y -= 15;
     }
 
     private void table(String[] headers, float[] widths, boolean[] rightAlign,
@@ -592,10 +553,6 @@ public class PdfReportWriter {
             total += w;
         }
         return total;
-    }
-
-    private int count(VariantResult v, boolean special) {
-        return (int) v.segments.stream().filter(s -> s.special == special).count();
     }
 
     private static String strategyRu(String strategy) {
