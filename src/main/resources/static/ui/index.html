@@ -115,6 +115,15 @@
   }
   #legend .row { display: flex; align-items: center; gap: 8px; }
   #legend[hidden] { display: none; }
+  #input-stats {
+    margin-top: 10px; border-top: 1px solid var(--accent-soft); padding-top: 8px;
+    display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; font-size: 12.5px;
+  }
+  #input-stats[hidden] { display: none; }
+  #input-stats .n { font-family: Consolas, monospace; font-weight: 600;
+    font-variant-numeric: tabular-nums; text-align: right; }
+  #input-stats .k { color: var(--muted); }
+  #input-stats .sub-k { color: var(--muted); font-size: 11.5px; padding-left: 10px; }
   #basemap {
     position: absolute; right: 12px; top: 12px; z-index: 4;
     background: rgba(255,255,255,.94); border: 1px solid var(--line);
@@ -155,6 +164,7 @@
       </div>
       <input id="file" type="file" accept=".geojson,.json" hidden>
       <div id="filemeta" class="sub"></div>
+      <div id="input-stats" hidden></div>
     </section>
 
     <section class="card">
@@ -323,16 +333,66 @@
     inputFile = f;
     baseData = null;
     $('filemeta').textContent = f.name + ' · ' + (f.size / 1024 / 1024).toFixed(2) + ' МБ';
+    $('input-stats').hidden = true;
     $('run').disabled = false;
     drop.classList.add('armed');
     drop.innerHTML = '<b>' + escapeHtml(f.name) + '</b><br>нажмите, чтобы заменить';
     if (f.size <= 64 * 1024 * 1024) {
-      f.text().then(t => { try { baseData = JSON.parse(t); drawAll(); } catch (e) { /* нарисуем после расчёта */ } });
+      f.text().then(t => { try { baseData = JSON.parse(t); renderInputStats(); drawAll(); } catch (e) { /* нарисуем после расчёта */ } });
     } else {
       status('Файл больше 64 МБ — подложка не отображается, результат будет показан', '');
     }
   }
   function escapeHtml(s) { const d = document.createElement('span'); d.textContent = s; return d.innerHTML; }
+
+  // ---------- сводка входного набора ----------
+  const RESTR_RU = { oks: 'здания (ОКС)', park: 'парки', social_area: 'соцобъекты',
+    prohibited_site: 'запретные территории', water: 'вода', railway: 'железная дорога',
+    road: 'автодороги', tram_tracks: 'трамвайные пути', gas_pipeline: 'газопроводы',
+    power_cable: 'силовые кабели' };
+  function renderInputStats() {
+    const box = $('input-stats');
+    if (!baseData || !Array.isArray(baseData.features)) { box.hidden = true; return; }
+    let oks = 0, flow = 0, pipes = 0, pipeLen = 0, chambers = 0, sources = 0;
+    const restr = new Map();
+    for (const f of baseData.features) {
+      const p = f.properties || {};
+      switch (p.object_type) {
+        case 'oks_connection_point': oks++; flow += +p.flow_tph || 0; break;
+        case 'heat_network': pipes++; pipeLen += lineLenM(f.geometry); break;
+        case 'heat_chamber': chambers++; break;
+        case 'source': sources++; break;
+        case 'restriction': {
+          const k = p.restriction_type || 'другое';
+          restr.set(k, (restr.get(k) || 0) + 1);
+        }
+      }
+    }
+    const row = (n, k, cls) => '<div class="n">' + n + '</div><div class="' + (cls || 'k') + '">' + k + '</div>';
+    let html = '';
+    html += row(oks, 'точек подключения ОКС · ' + flow.toLocaleString('ru-RU', { maximumFractionDigits: 1 }) + ' т/ч');
+    html += row(pipes, 'участков существующей сети · ' + (pipeLen / 1000).toLocaleString('ru-RU', { maximumFractionDigits: 1 }) + ' км');
+    html += row(chambers, 'тепловых камер' + (sources ? ' · источник: ' + sources : ''));
+    const total = [...restr.values()].reduce((a, b) => a + b, 0);
+    html += row(total, 'пространственных ограничений');
+    [...restr.entries()].sort((a, b) => b[1] - a[1]).forEach(([k, n]) => {
+      html += row(n, RESTR_RU[k] || k, 'sub-k');
+    });
+    box.innerHTML = html;
+    box.hidden = false;
+  }
+  function lineLenM(g) {
+    if (!g) return 0;
+    const lines = g.type === 'LineString' ? [g.coordinates]
+      : g.type === 'MultiLineString' ? g.coordinates : [];
+    let m = 0;
+    for (const cs of lines) for (let i = 0; i + 1 < cs.length; i++) {
+      const dx = (cs[i + 1][0] - cs[i][0]) * 111320 * Math.cos(cs[i][1] * Math.PI / 180);
+      const dy = (cs[i + 1][1] - cs[i][1]) * 111320;
+      m += Math.hypot(dx, dy);
+    }
+    return m;
+  }
 
   // ---------- справочник ----------
   function loadRules() {
