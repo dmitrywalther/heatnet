@@ -132,7 +132,11 @@
   #hint {
     position: absolute; inset: 0; display: flex; align-items: center;
     justify-content: center; color: var(--muted); font-size: 15px; z-index: 1;
-    text-align: center; padding: 0 40px;
+    text-align: center; padding: 0 40px; pointer-events: none;
+  }
+  #hint span {
+    background: rgba(255,255,255,.88); border: 1px solid var(--line);
+    border-radius: 10px; padding: 14px 22px;
   }
   a.plain { color: var(--purple); }
 </style>
@@ -188,7 +192,7 @@
 
   <div id="map-wrap">
     <svg id="map" aria-label="Карта трассировки"></svg>
-    <div id="hint">Загрузите входной GeoJSON и запустите расчёт —<br>карта района и варианты трассировки появятся здесь</div>
+    <div id="hint"><span>Загрузите входной GeoJSON и запустите расчёт —<br>карта района и варианты трассировки появятся здесь</span></div>
     <div id="tooltip"></div>
     <label id="basemap" hidden><input type="checkbox" id="basemap-cb" checked>Карта-подложка</label>
     <div id="osm-attr" hidden>© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors</div>
@@ -281,9 +285,23 @@
     tilesTimer = setTimeout(updateTiles, 120);
   }
   basemapCb.addEventListener('change', updateTiles);
+  // до загрузки файла показываем карту Москвы как заставку (только онлайн);
+  // после загрузки drawAll перецентрирует вид на данные, как обычно
+  function placeholderMap() {
+    if (proj.ready || baseData) return;
+    proj.lat0 = 55.752; proj.lon0 = 37.618; proj.ready = true;
+    svg.innerHTML = '';
+    tileCache.clear();
+    tileG = document.createElementNS(NS, 'g');
+    tileG.setAttribute('opacity', '0.55');
+    svg.appendChild(tileG);
+    vb = { x: -11000, y: -8000, w: 22000, h: 16000 };
+    fitAspect({ ...vb });
+    applyVb();
+  }
   (function probeTiles() {                       // офлайн — тумблер не показываем
     const im = new Image();
-    const done = ok => { if (ok) { tilesAvailable = true; basemapBox.hidden = false; updateTiles(); } };
+    const done = ok => { if (ok) { tilesAvailable = true; basemapBox.hidden = false; placeholderMap(); updateTiles(); } };
     im.onload = () => done(true);
     im.onerror = () => done(false);
     im.src = tileUrl(7, 79, 41);                 // тайл Москвы, ~10 КБ
