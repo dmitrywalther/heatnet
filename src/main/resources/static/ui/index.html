@@ -102,6 +102,18 @@
     text-align: left; padding: 8px 10px; border-radius: 8px; font-weight: 500;
   }
   .variant.active { border-color: var(--accent); background: #FFF3F7; }
+  .variant.compare { border-color: #2f8fe0; background: #EFF6FD; }
+  #compare-toggle { font-size: 12px; padding: 7px 10px; margin-top: 2px; }
+  #compare-toggle.on { border-color: #2f8fe0; color: #2f8fe0; font-weight: 600; }
+  #compare-stats { margin-top: 10px; border-top: 1px solid var(--accent-soft);
+    padding-top: 8px; font-size: 12.5px; display: grid;
+    grid-template-columns: auto 1fr 1fr 1fr; gap: 4px 10px; }
+  #compare-stats[hidden] { display: none; }
+  #compare-stats .h { color: var(--muted); font-size: 11px; }
+  #compare-stats .num { font-family: Consolas, monospace; font-variant-numeric: tabular-nums; }
+  #compare-stats .va { color: var(--accent); font-weight: 600; }
+  #compare-stats .vb { color: #2f8fe0; font-weight: 600; }
+  #compare-stats .delta { font-weight: 600; }
   .variant .vname { font-weight: 600; }
   .variant .vstats { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
   .modes { display: flex; gap: 6px; }
@@ -257,6 +269,8 @@
         <button id="mode-depth">С учётом глубины</button>
       </div>
       <div class="variants" id="variants"></div>
+      <button class="ghost" id="compare-toggle">⇄ Сравнить два варианта</button>
+      <div id="compare-stats" hidden></div>
       <div id="summary"></div>
       <div id="breakdown" hidden>
         <div class="bd-title">Интерпретация стоимости</div>
@@ -710,7 +724,20 @@
     return Object.values(map).sort((a, b) => (a.summary?.rank || 9) - (b.summary?.rank || 9));
   }
 
+  // ---------- режим сравнения двух вариантов ----------
+  let compareVariant = null;   // id варианта B; null — сравнение выключено
+  $('compare-toggle').addEventListener('click', () => {
+    const groups = groupVariants(modeData[mode]);
+    if (compareVariant) { compareVariant = null; }
+    else if (groups.length > 1) {
+      const other = groups.find(g => g.id !== currentVariant);
+      compareVariant = other && other.id;
+    }
+    selectVariant(currentVariant);
+  });
+
   function renderVariantList() {
+    compareVariant = null;
     const groups = groupVariants(modeData[mode]);
     const box = $('variants');
     box.innerHTML = '';
@@ -721,19 +748,27 @@
       b.innerHTML = '<span class="vname">#' + (s.rank || '?') + ' · вариант ' + g.id + '</span><br>'
         + '<span class="vstats">' + fmtRub(s.calculated_cost || 0) + ' · ' + fmtM(s.new_network_length || 0)
         + ' · score ' + (s.score ?? '—') + '</span>';
-      b.addEventListener('click', () => selectVariant(g.id));
+      b.addEventListener('click', () => {
+        // в режиме сравнения клик по другой карточке назначает её вариантом B
+        if (compareVariant && g.id !== currentVariant) { compareVariant = g.id; selectVariant(currentVariant); }
+        else selectVariant(g.id);
+      });
       box.appendChild(b);
     });
+    $('compare-toggle').hidden = groups.length < 2;
     if (groups.length) selectVariant(groups[0].id);
   }
 
   function selectVariant(vid) {
     currentVariant = vid;
+    if (compareVariant === vid) compareVariant = null;
+    const groups = groupVariants(modeData[mode]);
     document.querySelectorAll('.variant').forEach((b, i) => {
-      const groups = groupVariants(modeData[mode]);
       b.classList.toggle('active', groups[i] && groups[i].id === vid);
+      b.classList.toggle('compare', !!compareVariant && groups[i] && groups[i].id === compareVariant);
     });
-    const g = groupVariants(modeData[mode]).find(g => g.id === vid);
+    $('compare-toggle').classList.toggle('on', !!compareVariant);
+    const g = groups.find(g => g.id === vid);
     const s = g && g.summary || {};
     $('summary').innerHTML =
       cell(fmtRub(s.construction_cost || 0), 'стоимость строительства')
@@ -744,8 +779,32 @@
             ? 'не подключено: ' + s.unconnected_oks_ids.join(', ')
             : 'все ОКС подключены',
             s.unconnected_penalty ? 'штраф ' + fmtRub(s.unconnected_penalty) : 'без штрафов');
-    renderBreakdown(g);
+    renderCompareStats(groups);
+    if (compareVariant) { $('breakdown').hidden = true; }
+    else renderBreakdown(g);
     drawAll();
+  }
+
+  function renderCompareStats(groups) {
+    const box = $('compare-stats');
+    if (!compareVariant) { box.hidden = true; return; }
+    const a = groups.find(g => g.id === currentVariant), b = groups.find(g => g.id === compareVariant);
+    if (!a || !b) { box.hidden = true; return; }
+    const sa = a.summary || {}, sb = b.summary || {};
+    const fmtD = (v, f) => (v > 0 ? '+' : v < 0 ? '−' : '') + f(Math.abs(v));
+    box.innerHTML =
+      '<div class="h"></div><div class="h va">' + a.id + ' (розовый)</div>'
+      + '<div class="h vb">' + b.id + ' (синий)</div><div class="h">Δ (' + b.id + ' − ' + a.id + ')</div>'
+      + '<div class="h">стоимость</div><div class="num">' + fmtRub(sa.calculated_cost || 0) + '</div>'
+      + '<div class="num">' + fmtRub(sb.calculated_cost || 0) + '</div>'
+      + '<div class="num delta">' + fmtD((sb.calculated_cost || 0) - (sa.calculated_cost || 0), fmtRub) + '</div>'
+      + '<div class="h">длина</div><div class="num">' + fmtM(sa.new_network_length || 0) + '</div>'
+      + '<div class="num">' + fmtM(sb.new_network_length || 0) + '</div>'
+      + '<div class="num delta">' + fmtD((sb.new_network_length || 0) - (sa.new_network_length || 0), fmtM) + '</div>'
+      + '<div class="h">score</div><div class="num">' + (sa.score ?? '—') + '</div>'
+      + '<div class="num">' + (sb.score ?? '—') + '</div>'
+      + '<div class="num delta">' + fmtD((sb.score || 0) - (sa.score || 0), v => v.toFixed(4)) + '</div>';
+    box.hidden = false;
   }
   function cell(v, k) { return '<div><div class="v">' + v + '</div><div class="k">' + k + '</div></div>'; }
 
@@ -962,31 +1021,35 @@
       }
     });
 
-    // результат выбранного варианта
-    resultFeatures.filter(f => (f.properties || {}).variant_id === currentVariant).forEach(f => {
-      const p = f.properties, g = f.geometry;
-      if (!g) return;
-      if (p.object_type === 'heat_network') {
-        // без linecap/linejoin round: они подвешивают растеризацию
-        // скриншотов Chrome на насыщенных полилиниями страницах
-        const special = p.laying_method === 'special';
-        const line = el('polyline', {
-          points: linePts(g.coordinates), fill: 'none', stroke: '#FF0053',
-          'stroke-width': duWidth(p.diameter),
-          'stroke-dasharray': special ? '7 4' : 'none'
-        });
-        const hit = el('polyline', { points: linePts(g.coordinates), fill: 'none',
-          stroke: 'transparent', 'stroke-width': 12 });
-        hit.addEventListener('mousemove', e => showTip(e, p, line));
-        hit.addEventListener('mouseleave', () => hideTip(line, p));
-      } else if (p.object_type === 'heat_chamber') {
-        const [x, y] = toXY(g.coordinates[0], g.coordinates[1]);
-        el('circle', { cx: x, cy: y, r: 5, fill: '#FF0053', stroke: '#fff', 'stroke-width': 1.4 });
-      } else if (p.object_type === 'technical_node') {
-        const [x, y] = toXY(g.coordinates[0], g.coordinates[1]);
-        el('circle', { cx: x, cy: y, r: 3.5, fill: '#fff', stroke: '#FF0053', 'stroke-width': 1.5 });
-      }
-    });
+    // результат: в режиме сравнения вариант B рисуется шире и ниже A —
+    // совпадающие участки получают синюю кайму, различия видны чистым цветом
+    const drawResult = (vid, color, wExtra) => resultFeatures
+      .filter(f => (f.properties || {}).variant_id === vid).forEach(f => {
+        const p = f.properties, g = f.geometry;
+        if (!g) return;
+        if (p.object_type === 'heat_network') {
+          // без linecap/linejoin round: они подвешивают растеризацию
+          // скриншотов Chrome на насыщенных полилиниями страницах
+          const special = p.laying_method === 'special';
+          const line = el('polyline', {
+            points: linePts(g.coordinates), fill: 'none', stroke: color,
+            'stroke-width': duWidth(p.diameter) + wExtra,
+            'stroke-dasharray': special ? '7 4' : 'none'
+          });
+          const hit = el('polyline', { points: linePts(g.coordinates), fill: 'none',
+            stroke: 'transparent', 'stroke-width': 12 });
+          hit.addEventListener('mousemove', e => showTip(e, p, line));
+          hit.addEventListener('mouseleave', () => hideTip(line, p));
+        } else if (p.object_type === 'heat_chamber') {
+          const [x, y] = toXY(g.coordinates[0], g.coordinates[1]);
+          el('circle', { cx: x, cy: y, r: 5 + wExtra / 2, fill: color, stroke: '#fff', 'stroke-width': 1.4 });
+        } else if (p.object_type === 'technical_node') {
+          const [x, y] = toXY(g.coordinates[0], g.coordinates[1]);
+          el('circle', { cx: x, cy: y, r: 3.5, fill: '#fff', stroke: color, 'stroke-width': 1.5 });
+        }
+      });
+    if (compareVariant) drawResult(compareVariant, '#2f8fe0', 3);
+    drawResult(currentVariant, '#FF0053', 0);
 
     // точки ОКС поверх
     baseFeatures.filter(f => (f.properties || {}).object_type === 'oks_connection_point')
@@ -1033,11 +1096,14 @@
     const rows = [
       ['Участок', p.id],
       ['ДУ', p.diameter + ' мм'],
+    ];
+    if (compareVariant) rows.unshift(['Вариант', p.variant_id]);
+    rows.push(
       ['Расход', p.flow_tph + ' т/ч'],
       ['Длина', fmtM(p.length)],
       ['Прокладка', p.laying_method === 'special' ? 'спецпроход' : 'обычная'],
       ['Стоимость', fmtRub(p.cost)]
-    ];
+    );
     if (p.depth_start != null) rows.push(['Глубина', p.depth_start + ' → ' + p.depth_end + ' м']);
     tip.innerHTML = '<table>' + rows.map(r => '<tr><td>' + r[0] + '</td><td>' + r[1] + '</td></tr>').join('') + '</table>';
     tip.style.display = 'block';
