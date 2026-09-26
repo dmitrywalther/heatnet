@@ -199,10 +199,8 @@ public final class RestrictionRules {
         return rules.size();
     }
 
-    /** Действующий справочник в YAML — для просмотра и правки в UI. */
-    public String toYaml() {
-        ObjectMapper yaml = new ObjectMapper(new YAMLFactory()
-                .disable(com.fasterxml.jackson.dataformat.yaml.YAMLGenerator.Feature.WRITE_DOC_START_MARKER));
+    /** Действующий справочник как структура — для JSON API и сериализации. */
+    public Map<String, Object> toMap() {
         Map<String, Object> root = new java.util.LinkedHashMap<>();
         Map<String, Object> restrictions = new java.util.LinkedHashMap<>();
         java.util.List<String> keys = new java.util.ArrayList<>(rules.keySet());
@@ -215,8 +213,15 @@ public final class RestrictionRules {
         // (типовая правка в UI), попадает внутрь неё, а не в crossing-секцию
         root.put("heat_network_crossing", ruleToMap(heatNetworkCrossing));
         root.put("restrictions", restrictions);
+        return root;
+    }
+
+    /** Действующий справочник в YAML — для просмотра и правки. */
+    public String toYaml() {
+        ObjectMapper yaml = new ObjectMapper(new YAMLFactory()
+                .disable(com.fasterxml.jackson.dataformat.yaml.YAMLGenerator.Feature.WRITE_DOC_START_MARKER));
         try {
-            return yaml.writeValueAsString(root);
+            return yaml.writeValueAsString(toMap());
         } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
             throw new IllegalStateException("Не удалось сериализовать справочник", e);
         }

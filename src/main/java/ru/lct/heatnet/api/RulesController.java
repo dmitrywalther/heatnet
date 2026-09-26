@@ -40,4 +40,11 @@ public class RulesController {
                 .contentType(MediaType.parseMediaType("text/yaml;charset=UTF-8"))
                 .body(rules.toYaml());
     }
+
+    @Operation(summary = "Действующий справочник ограничений (JSON)",
+            description = "Та же структура, что и в YAML — для структурного редактора веб-интерфейса.")
+    @GetMapping(value = "/json", produces = MediaType.APPLICATION_JSON_VALUE)
+    public java.util.Map<String, Object> currentJson() {
+        return rules.toMap();
+    }
 }

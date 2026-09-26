@@ -55,6 +55,36 @@
     font: 11.5px/1.4 Consolas, "Cascadia Mono", monospace;
     border: 1px solid var(--line); border-radius: 6px; padding: 8px; color: var(--ink);
   }
+  #rules-editor { max-height: 300px; overflow-y: auto; border: 1px solid var(--line);
+    border-radius: 6px; }
+  .rule-row { border-bottom: 1px solid var(--line); }
+  .rule-row:last-child { border-bottom: none; }
+  .rule-head {
+    display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+    cursor: pointer; font-size: 12.5px; background: none; border: none;
+    width: 100%; text-align: left;
+  }
+  .rule-head:hover { background: var(--accent-soft); }
+  .rule-head .t { font-weight: 600; }
+  .rule-head .mode-chip {
+    margin-left: auto; font-size: 10.5px; padding: 2px 7px; border-radius: 8px;
+    background: var(--accent-soft); color: var(--accent); white-space: nowrap;
+  }
+  .rule-head .mode-chip.spec { background: #EDE3F5; color: var(--purple); }
+  .rule-body { padding: 4px 10px 10px; display: grid;
+    grid-template-columns: 1fr auto; gap: 6px 10px; align-items: center; font-size: 12px; }
+  .rule-body label { color: var(--muted); }
+  .rule-body input[type=number], .rule-body select {
+    width: 90px; font: 12px Consolas, monospace; padding: 4px 6px;
+    border: 1px solid var(--line); border-radius: 5px; color: var(--ink);
+  }
+  .rule-body .byDu { grid-column: 1 / -1; color: var(--muted); }
+  .rule-body .del { grid-column: 1 / -1; justify-self: end; font-size: 11.5px;
+    color: var(--accent); background: none; border: none; padding: 2px; cursor: pointer; }
+  #rules-add { display: flex; gap: 6px; margin-top: 8px; }
+  #rules-add input { flex: 1; font: 12px Consolas, monospace; padding: 7px 8px;
+    border: 1px solid var(--line); border-radius: 6px; color: var(--ink); }
+  #rules-add input:invalid { border-color: var(--accent); }
   button {
     font: 600 14px/1 inherit; padding: 10px 14px; border-radius: 8px;
     border: 1px solid var(--line); background: var(--card); color: var(--ink);
@@ -169,8 +199,14 @@
 
     <section class="card">
       <div class="label">2 · Справочник ограничений</div>
-      <div class="sub">Правила таблицы 2 можно править для этого расчёта — YAML применяется поверх встроенных.</div>
-      <textarea id="rules" spellcheck="false" aria-label="Справочник ограничений (YAML)"></textarea>
+      <div class="sub">Правила таблицы 2 можно править для этого расчёта: раскройте тип
+        или добавьте новый — изменения применяются поверх встроенных.</div>
+      <div id="rules-editor" aria-label="Справочник ограничений"></div>
+      <div id="rules-add">
+        <input id="new-type" placeholder="новый тип (латиницей), напр. metro"
+               pattern="[a-z][a-z0-9_]*" spellcheck="false">
+        <button class="ghost" id="add-type">Добавить</button>
+      </div>
       <div><button class="ghost" id="rules-reset">Сбросить к действующему</button></div>
     </section>
 
@@ -394,12 +430,149 @@
     return m;
   }
 
-  // ---------- справочник ----------
+  // ---------- справочник: структурный редактор ----------
+  // Модель = JSON-структура /api/v1/rules/json; редактор меняет только
+  // показанные поля, остальные (vertical и др.) сохраняются как есть.
+  // YAML собирается сериализатором — синтаксическая ошибка невозможна.
+  let rulesModel = null;
+  const openTypes = new Set();
+  const RULE_RU = { oks: 'здания (ОКС)', park: 'парки', social_area: 'соцобъекты',
+    prohibited_site: 'запретные территории', water: 'вода', railway: 'железная дорога',
+    road: 'автодороги', tram_tracks: 'трамвайные пути', gas_pipeline: 'газопроводы',
+    power_cable: 'силовые кабели', unknown_default: 'неизвестные типы (по умолчанию)' };
+
   function loadRules() {
-    fetch('/api/v1/rules').then(r => r.text()).then(t => { $('rules').value = t; });
+    fetch('/api/v1/rules/json').then(r => r.json()).then(m => {
+      rulesModel = m; openTypes.clear(); renderRules();
+    });
   }
   $('rules-reset').addEventListener('click', loadRules);
   loadRules();
+
+  function renderRules() {
+    const box = $('rules-editor');
+    box.innerHTML = '';
+    if (!rulesModel) return;
+    for (const [type, rule] of Object.entries(rulesModel.restrictions)) {
+      box.appendChild(ruleRow(type, rule));
+    }
+  }
+
+  function ruleRow(type, rule) {
+    const row = document.createElement('div');
+    row.className = 'rule-row';
+    const head = document.createElement('button');
+    head.type = 'button'; head.className = 'rule-head';
+    const spec = rule.mode === 'special';
+    const dist = rule.min_distance_by_du
+      ? rule.min_distance_by_du.map(t => t.distance).join('/') + ' м'
+      : (rule.min_distance != null ? rule.min_distance + ' м' : '');
+    head.innerHTML = '<span class="t">' + escapeHtml(type) + '</span>'
+      + '<span class="sub">' + (RULE_RU[type] || 'свой тип') + '</span>'
+      + '<span class="mode-chip' + (spec ? ' spec' : '') + '">'
+      + (spec ? 'спецпроход · K ' + (rule.k_spec != null ? rule.k_spec : 1) : 'запрещено · ' + dist) + '</span>';
+    head.addEventListener('click', () => {
+      openTypes.has(type) ? openTypes.delete(type) : openTypes.add(type);
+      renderRules();
+    });
+    row.appendChild(head);
+    if (openTypes.has(type)) row.appendChild(ruleForm(type, rule));
+    return row;
+  }
+
+  function numField(rule, key, label, step, body, opts) {
+    const lab = document.createElement('label'); lab.textContent = label;
+    const inp = document.createElement('input');
+    inp.type = 'number'; inp.step = step || '0.1';
+    if (rule[key] != null) inp.value = rule[key];
+    if (opts && opts.placeholder) inp.placeholder = opts.placeholder;
+    inp.addEventListener('change', () => {
+      const v = parseFloat(inp.value);
+      if (isNaN(v)) { delete rule[key]; } else { rule[key] = v; }
+      renderRules();
+    });
+    body.appendChild(lab); body.appendChild(inp);
+  }
+
+  function ruleForm(type, rule) {
+    const body = document.createElement('div');
+    body.className = 'rule-body';
+    const lab = document.createElement('label'); lab.textContent = 'режим';
+    const sel = document.createElement('select');
+    sel.innerHTML = '<option value="forbidden">запрещено (обход)</option>'
+      + '<option value="special">спецпроход</option>';
+    sel.value = rule.mode || 'forbidden';
+    sel.addEventListener('change', () => {
+      rule.mode = sel.value;
+      if (rule.mode === 'special') {
+        if (rule.special_margin == null) rule.special_margin = 2.0;
+        if (rule.k_spec == null) rule.k_spec = 1.25;
+      }
+      renderRules();
+    });
+    body.appendChild(lab); body.appendChild(sel);
+    if (rule.min_distance_by_du) {
+      const info = document.createElement('div');
+      info.className = 'byDu';
+      info.textContent = 'отступ по ДУ: '
+        + rule.min_distance_by_du.map(t =>
+            (t.max_du ? '≤' + t.max_du : 'больше') + ' → ' + t.distance + ' м').join(' · ');
+      body.appendChild(info);
+    } else {
+      numField(rule, 'min_distance', 'мин. отступ, м', '0.1', body);
+    }
+    if (rule.mode === 'special') {
+      numField(rule, 'k_spec', 'Kспец (1…1.75)', '0.05', body);
+      numField(rule, 'special_margin', 'граница спецучастка, м', '0.5', body);
+      numField(rule, 'min_angle', 'мин. угол пересечения, °', '5', body, { placeholder: 'нет' });
+      numField(rule, 'own_half_width', 'полуширина объекта, м', '0.05', body, { placeholder: '0' });
+    }
+    if (rule._new) {
+      const del = document.createElement('button');
+      del.type = 'button'; del.className = 'del'; del.textContent = 'убрать тип';
+      del.addEventListener('click', () => {
+        delete rulesModel.restrictions[type]; openTypes.delete(type); renderRules();
+      });
+      body.appendChild(del);
+    }
+    return body;
+  }
+
+  $('add-type').addEventListener('click', () => {
+    const inp = $('new-type');
+    const name = inp.value.trim().toLowerCase();
+    if (!/^[a-z][a-z0-9_]*$/.test(name) || !rulesModel) { inp.reportValidity(); return; }
+    if (!rulesModel.restrictions[name]) {
+      rulesModel.restrictions[name] = { mode: 'forbidden', min_distance: 1.0, _new: true };
+    }
+    openTypes.add(name);
+    inp.value = '';
+    renderRules();
+    const rows = document.querySelectorAll('#rules-editor .rule-row');
+    if (rows.length) rows[rows.length - 1].scrollIntoView({ block: 'nearest' });
+  });
+  $('new-type').addEventListener('keydown', e => { if (e.key === 'Enter') $('add-type').click(); });
+
+  // сериализация модели в YAML (служебные поля _new не пишем)
+  function yScalar(v) { return typeof v === 'string' ? JSON.stringify(v) : String(v); }
+  function yEmit(v, ind) {
+    const pad = ' '.repeat(ind), out = [];
+    if (Array.isArray(v)) {
+      for (const item of v) {
+        const lines = yEmit(item, 0);
+        out.push(pad + '- ' + lines[0].trim());
+        for (let i = 1; i < lines.length; i++) out.push(pad + '  ' + lines[i].trim());
+      }
+      return out;
+    }
+    for (const [k, val] of Object.entries(v)) {
+      if (k.startsWith('_')) continue;
+      if (val && typeof val === 'object') { out.push(pad + k + ':'); out.push(...yEmit(val, ind + 2)); }
+      else out.push(pad + k + ': ' + yScalar(val));
+    }
+    return out;
+  }
+  function rulesYaml() { return rulesModel ? yEmit(rulesModel, 0).join('\n') + '\n' : ''; }
 
   // ---------- запуск расчёта ----------
   const statusEl = $('status');
@@ -412,7 +585,7 @@
     modeData = { '2d': null, depth: null };
     const form = new FormData();
     form.append('file', inputFile);
-    const rulesText = $('rules').value.trim();
+    const rulesText = rulesYaml();
     if (rulesText) form.append('rules', new Blob([rulesText], { type: 'text/yaml' }), 'rules.yml');
     status('Загрузка файла…');
     const started = Date.now();
