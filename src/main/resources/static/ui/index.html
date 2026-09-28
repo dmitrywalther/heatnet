@@ -967,14 +967,26 @@
     proj.lat0 = (b.minLat + b.maxLat) / 2;
     proj.lon0 = b.minLon;
     proj.ready = true;
-    const [maxX] = toXY(b.maxLon, proj.lat0);
-    const [, maxY] = toXY(b.minLon, b.minLat);
-    const [, minY] = toXY(b.minLon, b.maxLat);
-
     svg.innerHTML = '';
     tileCache.clear();
     tileG = el('g', { opacity: 0.55 });   // подложка OSM — самым нижним слоем
-    const world = { x: -40, y: minY - 40, w: maxX + 80, h: (maxY - minY) + 80 };
+    // вид целим не в полный bbox (ограничения тянутся далеко за квартал),
+    // а в рабочую зону: точки ОКС + построенная сеть; полный bbox — запасной
+    const focusFeats = baseFeatures
+      .filter(f => (f.properties || {}).object_type === 'oks_connection_point')
+      .concat(resultFeatures.filter(f => {
+        const v = (f.properties || {}).variant_id;
+        return v === currentVariant || (compareVariant && v === compareVariant);
+      }));
+    const fb = geomBounds(focusFeats) || b;
+    const [fMinX] = toXY(fb.minLon, proj.lat0);
+    const [fMaxX] = toXY(fb.maxLon, proj.lat0);
+    const [, fMinY] = toXY(fb.minLon, fb.maxLat);
+    const [, fMaxY] = toXY(fb.minLon, fb.minLat);
+    const padX = Math.max(60, (fMaxX - fMinX) * 0.18);
+    const padY = Math.max(60, (fMaxY - fMinY) * 0.18);
+    const world = { x: fMinX - padX, y: fMinY - padY,
+                    w: (fMaxX - fMinX) + padX * 2, h: (fMaxY - fMinY) + padY * 2 };
     fitAspect(world);
     const target = { ...vb };
     if (prev) {
