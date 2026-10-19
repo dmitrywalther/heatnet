@@ -21,27 +21,29 @@ function element() {
     set textContent(x){this.text=x;this.children=[];},get textContent(){return this.text||'';}};
 }
 function setup(fetcher) {
-  const nodes = new Map(), views=[],calls=[];
+  const nodes = new Map(), views=[],cards=[],calls=[];
   let widgetOptions;
   const $ = id => {if(!nodes.has(id))nodes.set(id,element());return nodes.get(id);};
   const context=vm.createContext({$,jobId:'job-a',mode:'depth',currentVariant:'d1',modeData:{depth:{}},
     requestVersion:1,Promise,encodeURIComponent,Number,Map,Set,
     document:{createElement:element},
     HeatnetProfile:{create:opts=>{widgetOptions=opts;return {setData:x=>views.push(x),setMessage:x=>views.push(x),clear(){},highlightSegment(){}};}},
+    HeatnetConnectionCard:{create:()=>({setData:x=>cards.push(x),setMessage:x=>cards.push(x),clear(){},highlightSegment(){}})},
     drawProfileOverlay(){}, svg:element(),el:()=>element(),toXY:(...x)=>x,linePts:x=>x,
     fetch:async url=>{calls.push(url);return fetcher(url);}
   });
   assert.ok(html.includes(begin),'UI must wire the longitudinal profile lifecycle');
   vm.runInContext(html.slice(html.indexOf(begin),html.indexOf(end)),context);
-  return {$,views,calls,context,widgetOptions,eval:s=>vm.runInContext(s,context)};
+  return {$,views,cards,calls,context,widgetOptions,eval:s=>vm.runInContext(s,context)};
 }
 test('depth selection loads typed OKS choices and selected profile without rerunning calculation',async()=>{
   const h=setup(url=>ok(url.includes('oks_key=')?profile:list));
   h.eval('syncProfile()');await flush();
   assert.equal(h.$('profile-oks').children.length,2);
-  assert.equal(h.$('profile-oks').children[1].disabled,true);
+  assert.equal(h.$('profile-oks').children[1].disabled,false);
   assert.equal(h.views.at(-1).oks.key,'n:2');
-  assert.ok(h.calls.every(u=>u.includes('/profile?')));
+  assert.ok(h.calls.some(u=>u.includes('/connection?')));
+  assert.ok(h.calls.some(u=>u.includes('/profile?')));
 });
 test('late profile cannot reappear after switching to base mode',async()=>{
   const pending=defer();
@@ -85,7 +87,7 @@ test('reopening a closed panel restores the chart without another request',async
 });
 test('closing while a profile loads prevents it reopening and allows retry',async()=>{
   const pending=defer();let first=true;
-  const h=setup(url=>url.includes('oks_key=')?(first?(first=false,pending.promise):ok(profile)):ok(list));
+  const h=setup(url=>url.includes('/profile?')?(first?(first=false,pending.promise):ok(profile)):ok(url.includes('oks_key=')?profile:list));
   h.eval('syncProfile()');await flush();h.widgetOptions.onClose();
   pending.resolve(ok(profile));await flush();
   assert.equal(h.$('profile-panel').hidden,true);
@@ -109,7 +111,7 @@ test('retry reloads a failed variant list despite a previously selected OKS',asy
   });
   h.eval('syncProfile()');await flush();
   h.context.currentVariant='d3';h.eval('syncProfile()');await flush();
-  assert.match(h.views.at(-1),/Temporary network failure/);
+  assert.match(h.cards.at(-1),/Temporary network failure/);
   h.$('profile-open').handlers.click();await flush();
   assert.equal(h.views.at(-1).variant_id,'d3');
   assert.equal(h.views.at(-1).oks.key,'n:2');

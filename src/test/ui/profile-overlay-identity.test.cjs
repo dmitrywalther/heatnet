@@ -29,6 +29,7 @@ function harness() {
   const svg = element('svg'), selected = [];
   const context = vm.createContext({svg, Map, Set,
     mode: 'depth', profileMapOverlay: null, selectedOksKey: 'n:1', profileHoverId: 'd1_net_22', profileMarker: [37.05, 55],
+    activeConnection:null, connectionTarget:null,
     profileOks: [
       {key: 'n:1', label: '1', connected: true, coordinates: [37, 55]},
       {key: 'n:2', label: '2', connected: true, coordinates: [37.1, 55]},
@@ -69,12 +70,12 @@ test('selection and coordinate updates preserve keyboard focus and typed OKS ide
   assert.equal(h.focus(), focused);
   assert.equal(focused.attributes.r, '8');
   assert.equal(focused.attributes.cx, '3715');
-  assert.equal(stringPoint.attributes.tabindex, '-1');
+  assert.equal(stringPoint.attributes.tabindex, '0');
   focused.emit('keydown', {key: 'Enter'});
   assert.deepEqual(h.selected, ['n:2']);
 });
 
-test('full map redraw rebuilds a detached overlay and leaving depth removes it', () => {
+test('full map redraw rebuilds a detached overlay and base mode keeps the shared OKS selection', () => {
   const h = harness(); h.draw(); const old = h.point('n:2');
   h.svg.replaceChildren(); h.draw();
   assert.equal(old.isConnected, false);
@@ -82,6 +83,8 @@ test('full map redraw rebuilds a detached overlay and leaving depth removes it',
   assert.equal(h.point('n:2').isConnected, true);
   assert.equal(h.all(h.svg).filter(node => node.attributes['data-profile-overlay']).length, 1);
   h.context.mode = '2d'; h.draw();
+  assert.ok(h.point('n:2'));
+  h.context.profileOks = []; h.draw();
   assert.equal(h.point('n:2'), undefined);
   assert.equal(h.context.profileMapOverlay, null);
 });

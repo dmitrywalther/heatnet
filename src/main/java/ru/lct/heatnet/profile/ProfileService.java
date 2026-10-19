@@ -55,15 +55,36 @@ public class ProfileService {
             throw new ResponseStatusException(HttpStatus.CONFLICT,"Файлы глубинного результата недоступны");
         Path rules=input.resolveSibling(job.getId()+"-rules.yml");
         try {
-            ProfileScene scene=load(input,depth,rules,variant);
+            ProfileScene scene=load(input,depth,rules,variant,true);
             return oksKey==null?scene.list():scene.profile(oksKey);
         } catch(IllegalArgumentException e) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,e.getMessage(),e);
         }
     }
 
-    private synchronized ProfileScene load(Path input,Path depth,Path rules,String variant) throws IOException {
-        String signature=stamp(input)+"|"+stamp(depth)+"|"+(Files.exists(rules)?stamp(rules):"builtin")+"|"+variant;
+    public Map<String,Object> getConnection(String id,String variant,String oksKey) throws IOException {
+        JobEntity job=jobs.get(id);
+        if(job==null) throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Задача не найдена");
+        if(variant==null||!variant.matches("[vd][0-9]+"))
+            throw new ResponseStatusException(HttpStatus.CONFLICT,"Неизвестный вариант подключения");
+        boolean depthMode=variant.startsWith("d");
+        String resultPath=depthMode?job.getDepthResultPath():job.getResultPath();
+        if(job.getStatus()!=JobEntity.Status.DONE||resultPath==null||job.getInputPath()==null)
+            throw new ResponseStatusException(HttpStatus.CONFLICT,"Карточка подключения недоступна для этой задачи и режима");
+        Path input=Paths.get(job.getInputPath()),result=Paths.get(resultPath);
+        if(!Files.isRegularFile(input)||!Files.isRegularFile(result))
+            throw new ResponseStatusException(HttpStatus.CONFLICT,"Файлы результата подключения недоступны");
+        Path rules=input.resolveSibling(job.getId()+"-rules.yml");
+        try {
+            ProfileScene scene=load(input,result,rules,variant,depthMode);
+            return oksKey==null?scene.connections():scene.connection(oksKey);
+        } catch(IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,e.getMessage(),e);
+        }
+    }
+
+    private synchronized ProfileScene load(Path input,Path depth,Path rules,String variant,boolean depthMode) throws IOException {
+        String signature=stamp(input)+"|"+stamp(depth)+"|"+(Files.exists(rules)?stamp(rules):"builtin")+"|"+variant+"|"+depthMode;
         ProfileScene existing=cache.get(signature);
         if(existing!=null) return existing;
         RestrictionRules effective=serverRules;
@@ -75,7 +96,7 @@ public class ProfileService {
         try(InputStream in=Files.newInputStream(depth);
             JsonParser parser=new JsonParserDelegate(mapper.getFactory().createParser(in)) {
                 @Override public boolean isNaN() { return false; }
-            }) { scene=new ProfileScene(model,mapper.readTree(parser),effective,variant); }
+            }) { scene=new ProfileScene(model,mapper.readTree(parser),effective,variant,depthMode); }
         int count=scene.coordinateCount();
         if(count<=MAX_CACHED_COORDINATES) {
             Iterator<Map.Entry<String,ProfileScene>> iterator=cache.entrySet().iterator();

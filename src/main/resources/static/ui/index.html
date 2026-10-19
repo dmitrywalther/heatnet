@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>HEATNET — трассировка тепловых сетей</title>
 <link rel="stylesheet" href="longitudinal-profile.css">
+<link rel="stylesheet" href="connection-card.css">
 <style>
   :root {
     --accent: #FF0053;
@@ -294,10 +295,11 @@
       </div>
       <div class="variants" id="variants"></div>
       <div id="profile-controls" hidden>
-        <label for="profile-oks">Продольный профиль до ОКС</label>
-        <select id="profile-oks" aria-label="ОКС для продольного профиля"></select>
+        <label for="profile-oks">Подключение ОКС</label>
+        <select id="profile-oks" aria-label="ОКС для карточки подключения и профиля"></select>
         <button class="ghost" id="profile-open">Показать профиль</button>
-        <p id="profile-help">Выберите ОКС в списке или на карте. Профиль относится к основному выбранному варианту.</p>
+        <p id="profile-help">Выберите ОКС в списке или на карте. Карточка и профиль относятся к основному выбранному варианту.</p>
+        <section id="connection-card" aria-label="Карточка подключения выбранного ОКС" hidden></section>
       </div>
       <button class="ghost" id="compare-toggle">⇄ Сравнить два варианта</button>
       <div id="compare-stats" hidden></div>
@@ -345,6 +347,7 @@
 
 <script src="geojson-input.js"></script>
 <script src="longitudinal-profile.js"></script>
+<script src="connection-card.js"></script>
 <script>
 (function () {
   'use strict';
@@ -1012,24 +1015,36 @@
   function cell(v, k) { return '<div><div class="v">' + v + '</div><div class="k">' + k + '</div></div>'; }
 
   // ---------- продольный профиль ----------
-  let profileVersion = 0, profileContext = null, profileOks = [], selectedOksKey = null;
+  let connectionVersion = 0, activeConnection = null, connectionTarget = null;
+  let profileVersion = 0, profileContext = null, profileOks = [], selectedOksKey = null, profileWanted = false;
   let activeProfile = null, profileMapOverlay = null, profileMarker = null, profileHoverId = null;
+  const connectionView = HeatnetConnectionCard.create({
+    container: $('connection-card'), onTarget: focusConnectionTarget,
+    onRetry: () => {
+      if (profileOks.some(oks => oks.key === selectedOksKey)) selectProfileOks(selectedOksKey, profileWanted);
+      else { profileContext = null; syncProfile(); }
+    }
+  });
   const profileView = HeatnetProfile.create({
     container: $('profile-panel'),
-    onSegmentHover: id => { profileHoverId = id; if (id == null) profileMarker = null; drawProfileOverlay(); },
+    onSegmentHover: id => { profileHoverId = id; connectionTarget = null; if (id == null) profileMarker = null;
+      connectionView.highlightSegment(id); drawProfileOverlay(); },
     onPosition: position => { profileMarker = position && position.coordinate; drawProfileOverlay(); },
     onClose: () => {
       profileVersion++;
+      profileWanted = false;
       $('profile-panel').hidden = true;
       profileHoverId = null; profileMarker = null;
-      if (!profileOks.length) profileContext = null;
       $('profile-open').disabled = false;
       drawProfileOverlay();
     }
   });
 
   function resetProfile() {
+    connectionVersion++;
     profileVersion++;
+    activeConnection = null; connectionTarget = null;
+    profileWanted = false;
     profileContext = null;
     profileOks = [];
     selectedOksKey = null;
@@ -1041,6 +1056,7 @@
     $('profile-panel').hidden = true;
     $('profile-oks').replaceChildren();
     profileView.clear();
+    connectionView.clear();
   }
 
   async function readProfileResponse(url) {
@@ -1055,76 +1071,142 @@
       + '/profile?variant_id=' + encodeURIComponent(currentVariant);
   }
 
+  function connectionUrl() {
+    return '/api/v1/tracing/jobs/' + encodeURIComponent(jobId)
+      + '/connection?variant_id=' + encodeURIComponent(currentVariant);
+  }
+
   function syncProfile() {
-    if (mode !== 'depth' || !jobId || !currentVariant) {
+    if (!jobId || !currentVariant) {
       resetProfile();
       return;
     }
-    const context = jobId + '/' + currentVariant;
+    const context = jobId + '/' + mode + '/' + currentVariant;
     if (profileContext === context) { drawProfileOverlay(); return; }
     const previousKey = selectedOksKey;
     resetProfile();
     profileContext = context;
+    profileWanted = mode === 'depth';
     selectedOksKey = previousKey;
-    const version = ++profileVersion;
+    const version = ++connectionVersion;
     $('profile-controls').hidden = false;
     $('profile-oks').disabled = true;
     $('profile-open').disabled = true;
-    $('profile-panel').hidden = false;
-    profileView.setMessage('Загрузка списка ОКС…');
-    readProfileResponse(profileUrl()).then(data => {
-      if (version !== profileVersion || context !== profileContext) return;
+    $('profile-open').hidden = mode !== 'depth';
+    connectionView.setMessage('Загрузка списка ОКС…');
+    readProfileResponse(connectionUrl()).then(data => {
+      if (version !== connectionVersion || context !== profileContext) return;
       profileOks = data.oks || [];
       profileOks.forEach(oks => {
         const option = document.createElement('option');
         option.value = oks.key;
         option.textContent = 'ОКС ' + oks.label + (oks.connected ? '' : ' — не подключён');
-        option.disabled = !oks.connected;
+        option.disabled = false;
         $('profile-oks').appendChild(option);
       });
-      const selected = profileOks.find(o => o.key === selectedOksKey && o.connected)
-        || profileOks.find(o => o.connected);
+      const selected = profileOks.find(o => o.key === selectedOksKey)
+        || profileOks.find(o => o.connected) || profileOks[0];
       $('profile-oks').disabled = !selected;
       $('profile-open').disabled = !selected;
-      if (!selected) { profileView.setMessage('В этом варианте нет подключённых ОКС.'); return; }
-      selectProfileOks(selected.key);
+      if (!selected) { connectionView.setMessage('В этом варианте нет ОКС.'); return; }
+      selectProfileOks(selected.key, profileWanted);
     }).catch(error => {
-      if (version !== profileVersion) return;
-      profileView.setMessage('Не удалось загрузить профиль: ' + error.message);
+      if (version !== connectionVersion) return;
+      connectionView.setMessage('Не удалось загрузить список ОКС: ' + error.message, true);
       $('profile-open').disabled = false;
     });
   }
 
-  function selectProfileOks(key) {
-    const choice = profileOks.find(o => o.key === key && o.connected);
+  function selectProfileOks(key, openProfile = true) {
+    const choice = profileOks.find(o => o.key === key);
     if (!choice) return;
     selectedOksKey = key;
+    profileWanted = openProfile && mode === 'depth';
     $('profile-oks').value = key;
-    const version = ++profileVersion;
+    const version = ++connectionVersion, context = profileContext;
+    profileVersion++;
+    activeConnection = null; connectionTarget = null;
     activeProfile = null; profileHoverId = null; profileMarker = null;
+    profileView.clear();
     drawProfileOverlay();
+    $('profile-open').disabled = !choice.connected;
+    connectionView.setMessage('Загрузка подключения ОКС ' + choice.label + '…');
+    readProfileResponse(connectionUrl() + '&oks_key=' + encodeURIComponent(key)).then(data => {
+      if (version !== connectionVersion || context !== profileContext) return;
+      activeConnection = data; connectionView.setData(data); drawProfileOverlay();
+    }).catch(error => {
+      if (version !== connectionVersion || context !== profileContext) return;
+      connectionView.setMessage('Не удалось загрузить карточку: ' + error.message, true);
+    });
+    if (profileWanted && choice.connected) loadSelectedProfile(choice);
+  }
+
+  function loadSelectedProfile(choice) {
+    const version = ++profileVersion, context = profileContext;
     $('profile-panel').hidden = false;
     profileView.setMessage('Строим профиль до ОКС ' + choice.label + ' по сохранённой трассе…');
-    readProfileResponse(profileUrl() + '&oks_key=' + encodeURIComponent(key)).then(data => {
-      if (version !== profileVersion) return;
+    readProfileResponse(profileUrl() + '&oks_key=' + encodeURIComponent(choice.key)).then(data => {
+      if (version !== profileVersion || context !== profileContext) return;
       activeProfile = data;
       profileView.setData(data);
       drawProfileOverlay();
     }).catch(error => {
-      if (version !== profileVersion) return;
+      if (version !== profileVersion || context !== profileContext) return;
       profileView.setMessage('Не удалось построить профиль: ' + error.message);
     });
   }
 
   $('profile-oks').addEventListener('change', () => selectProfileOks($('profile-oks').value));
   $('profile-open').addEventListener('click', () => {
+    if (mode !== 'depth') return;
+    profileWanted = true;
     if (activeProfile) { profileView.setData(activeProfile); $('profile-panel').hidden = false; return; }
-    if (profileOks.some(oks => oks.key === selectedOksKey && oks.connected)) selectProfileOks(selectedOksKey);
+    const choice = profileOks.find(oks => oks.key === selectedOksKey && oks.connected);
+    if (choice) loadSelectedProfile(choice);
     else { profileContext = null; syncProfile(); }
   });
 
+  // Display marker only: this interpolation does not change exported lengths or routing.
+  function connectionMidpoint(coordinates) {
+    if (!Array.isArray(coordinates) || !coordinates.length
+      || coordinates.some(c => !Array.isArray(c) || !Number.isFinite(c[0]) || !Number.isFinite(c[1]))) return null;
+    if (coordinates.length === 1) return coordinates[0];
+    const scale = Math.cos(coordinates.reduce((sum, c) => sum + c[1], 0) / coordinates.length * Math.PI / 180);
+    const lengths = coordinates.slice(1).map((c, i) => Math.hypot((c[0] - coordinates[i][0]) * scale, c[1] - coordinates[i][1]));
+    let remaining = lengths.reduce((sum, n) => sum + n, 0) / 2;
+    for (let i = 0; i < lengths.length; i++) {
+      if (remaining <= lengths[i] || i === lengths.length - 1) {
+        const fraction = lengths[i] ? remaining / lengths[i] : 0;
+        return coordinates[i].slice(0, 2).map((n, axis) => n + fraction * (coordinates[i + 1][axis] - n));
+      }
+      remaining -= lengths[i];
+    }
+    return null;
+  }
+
+  function focusConnectionTarget(target) {
+    if (!activeConnection || !target) return;
+    connectionTarget = target;
+    const segments = activeConnection.segments || [];
+    let segment = segments.find(s => s.id === target.segment_id);
+    if (!segment && target.kind === 'obstacle' && !target.coordinates) {
+      const matches = (activeConnection.obstacles || []).filter(o => o.key === target.key);
+      const obstacle = matches.length === 1 ? matches[0] : null;
+      if (obstacle) segment = segments.find(s => s.from <= (obstacle.from + obstacle.to) / 2 && s.to >= (obstacle.from + obstacle.to) / 2);
+    }
+    profileHoverId = segment?.id || null;
+    profileView.highlightSegment(profileHoverId); connectionView.highlightSegment(profileHoverId);
+    const coordinates = target.coordinates || connectionMidpoint(segment?.coordinates);
+    profileMarker = Array.isArray(coordinates) && coordinates.length >= 2 && coordinates.slice(0, 2).every(Number.isFinite) ? coordinates : null;
+    if (profileMarker && proj.ready && vb) {
+      const [x, y] = toXY(...profileMarker); cancelFly();
+      vb = {...vb, x:x - vb.w / 2, y:y - vb.h / 2}; applyVb();
+    }
+    drawProfileOverlay();
+  }
+
   function drawProfileOverlay() {
-    if (mode !== 'depth' || !profileOks.length) {
+    if (!profileOks.length) {
       profileMapOverlay?.remove(); profileMapOverlay = null;
       return;
     }
@@ -1140,7 +1222,7 @@
     }
     const pathGroup = profileMapOverlay.profilePaths;
     pathGroup.replaceChildren();
-    (activeProfile?.segments || []).forEach(segment => {
+    (activeConnection?.segments || activeProfile?.segments || []).forEach(segment => {
       el('polyline', { points: linePts(segment.coordinates), fill: 'none', stroke: '#008878',
         'stroke-width': 5, opacity: .8, 'vector-effect': 'non-scaling-stroke' }, pathGroup);
       if (segment.id === profileHoverId) el('polyline', {
@@ -1167,9 +1249,9 @@
       const [cx, cy] = toXY(...oks.coordinates);
       const attrs = { cx, cy, r: oks.key === selectedOksKey ? 8 : 6,
         fill: oks.key === selectedOksKey ? '#008878' : '#310F53', stroke: '#fff', 'stroke-width': 1.5,
-        role: 'button', tabindex: oks.connected ? 0 : -1,
-        'aria-label': 'Профиль ОКС ' + oks.label + (oks.connected ? '' : ': не подключён'),
-        'aria-disabled': String(!oks.connected), style: 'cursor:' + (oks.connected ? 'pointer' : 'default')
+        role: 'button', tabindex: 0,
+        'aria-label': 'Подключение ОКС ' + oks.label + (oks.connected ? '' : ': не подключён'),
+        'aria-disabled': 'false', style: 'cursor:pointer'
       };
       Object.entries(attrs).forEach(([name, value]) => entry.point.setAttribute(name, value));
       entry.title.textContent = 'ОКС ' + oks.label;
@@ -1178,6 +1260,10 @@
       if (!presentKeys.has(key)) { entry.point.remove(); profileMapOverlay.pointNodes.delete(key); }
     });
     profileMapOverlay.profileMarkers.replaceChildren();
+    if (connectionTarget?.wall_coordinates) el('polyline', {
+      points:linePts(connectionTarget.wall_coordinates), fill:'none', stroke:'#ff9b21',
+      'stroke-width':7, 'vector-effect':'non-scaling-stroke', 'data-connection-wall':'true'
+    }, profileMapOverlay.profileMarkers);
     if (profileMarker) {
       const [cx, cy] = toXY(...profileMarker);
       el('circle', { cx, cy, r: 5, fill: '#ff9b21', stroke: '#fff', 'stroke-width': 2,
@@ -1430,14 +1516,18 @@
             stroke: 'transparent', 'stroke-width': 12 });
           hit.addEventListener('mousemove', e => {
             showTip(e, p, line);
-            if (vid === currentVariant && activeProfile) {
+            if (vid === currentVariant && (activeProfile || activeConnection)) {
               profileView.highlightSegment(p.id);
+              connectionView.highlightSegment(p.id);
+              connectionTarget = null; profileMarker = null;
               profileHoverId = p.id; drawProfileOverlay();
             }
           });
           hit.addEventListener('mouseleave', () => {
             hideTip(line, p);
             profileView.highlightSegment(null);
+            connectionView.highlightSegment(null);
+            connectionTarget = null;
             profileHoverId = null; profileMarker = null; drawProfileOverlay();
           });
         } else if (p.object_type === 'heat_chamber') {
