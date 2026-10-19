@@ -36,7 +36,7 @@ async function harness(handler = async () => reply({status: 'RUNNING'})) {
     inputFile: {name: 'old.geojson', size: 10}, inputText: null, addedInputFeatures: [],
     baseData: null, inputModified: false, jobId: null, modeData: {}, mode: '2d', currentVariant: null,
     compareVariant: null, drop: $('drop'), svg: $('map'), proj: {ready: false}, tileCache: new Map(),
-    setDrawMode() {}, cancelFly() {}, renderInputStats() {}, renderVariantList() {}, drawAll() {},
+    setDrawMode() {}, cancelFly() {}, renderInputStats() {}, renderVariantList() {}, drawAll() {}, resetProfile() {},
     setTimeout(fn) { timers.push(fn); }, clearTimeout() {},
     groupVariants: value => value?.features?.filter(f => f.properties?.object_type === 'variant_summary') || [],
     document: {createElement: element, querySelector: selector => $(selector), querySelectorAll: () => []},

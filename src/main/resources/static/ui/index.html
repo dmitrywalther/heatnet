@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>HEATNET — трассировка тепловых сетей</title>
+<link rel="stylesheet" href="longitudinal-profile.css">
 <style>
   :root {
     --accent: #FF0053;
@@ -153,7 +154,14 @@
   .bd-row.bd-total .bd-line { font-weight: 600; }
   .bd-row.bd-total .bd-track { background: #2b2140; }
   .downloads { display: flex; flex-wrap: wrap; gap: 6px; }
-  #map-wrap { flex: 1; position: relative; min-width: 0; }
+  #map-column { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+  #map-wrap { flex: 1; position: relative; min-width: 0; min-height: 180px; }
+  #profile-panel { flex: none; max-height: 46vh; overflow: auto; background: white;
+    border-top: 1px solid var(--line); }
+  #profile-controls { border-top: 1px solid var(--line); padding-top: 10px; }
+  #profile-controls label { display: block; font-size: 12px; color: var(--purple); margin-bottom: 5px; }
+  #profile-oks { max-width: 100%; padding: 6px; border: 1px solid var(--line); border-radius: 5px; }
+  #profile-help { margin: 6px 0; font-size: 11.5px; color: var(--muted); }
   #map { width: 100%; height: 100%; display: block; cursor: grab; background: #fff; }
   #map.drag { cursor: grabbing; }
   #tooltip {
@@ -285,6 +293,12 @@
         <button id="mode-depth">С учётом глубины</button>
       </div>
       <div class="variants" id="variants"></div>
+      <div id="profile-controls" hidden>
+        <label for="profile-oks">Продольный профиль до ОКС</label>
+        <select id="profile-oks" aria-label="ОКС для продольного профиля"></select>
+        <button class="ghost" id="profile-open">Показать профиль</button>
+        <p id="profile-help">Выберите ОКС в списке или на карте. Профиль относится к основному выбранному варианту.</p>
+      </div>
       <button class="ghost" id="compare-toggle">⇄ Сравнить два варианта</button>
       <div id="compare-stats" hidden></div>
       <div id="summary"></div>
@@ -300,6 +314,7 @@
     </section>
   </aside>
 
+  <div id="map-column">
   <div id="map-wrap">
     <svg id="map" aria-label="Карта трассировки"></svg>
     <div id="hint"><span>Загрузите входной GeoJSON и запустите расчёт —<br>карта района и варианты трассировки появятся здесь</span></div>
@@ -324,9 +339,12 @@
       <div class="row"><svg width="30" height="12"><circle cx="15" cy="6" r="4.5" fill="#FF0053"/></svg>новые камеры · <svg width="14" height="12"><circle cx="7" cy="6" r="4" fill="#fff" stroke="#FF0053" stroke-width="1.5"/></svg> техузлы</div>
     </div>
   </div>
+  <section id="profile-panel" aria-label="Продольный профиль выбранного ОКС" hidden></section>
+  </div>
 </main>
 
 <script src="geojson-input.js"></script>
+<script src="longitudinal-profile.js"></script>
 <script>
 (function () {
   'use strict';
@@ -723,6 +741,7 @@
   // Серверная задача может завершиться позже: старый ответ не относится к новому входу.
   function invalidateCalculation() {
     requestVersion++;
+    resetProfile();
     calculationRunning = false;
     jobId = null;
     modeData = { '2d': null, depth: null };
@@ -966,6 +985,7 @@
     if (compareVariant) { $('breakdown').hidden = true; }
     else renderBreakdown(g);
     drawAll();
+    syncProfile();
   }
 
   function renderCompareStats(groups) {
@@ -990,6 +1010,181 @@
     box.hidden = false;
   }
   function cell(v, k) { return '<div><div class="v">' + v + '</div><div class="k">' + k + '</div></div>'; }
+
+  // ---------- продольный профиль ----------
+  let profileVersion = 0, profileContext = null, profileOks = [], selectedOksKey = null;
+  let activeProfile = null, profileMapOverlay = null, profileMarker = null, profileHoverId = null;
+  const profileView = HeatnetProfile.create({
+    container: $('profile-panel'),
+    onSegmentHover: id => { profileHoverId = id; if (id == null) profileMarker = null; drawProfileOverlay(); },
+    onPosition: position => { profileMarker = position && position.coordinate; drawProfileOverlay(); },
+    onClose: () => {
+      profileVersion++;
+      $('profile-panel').hidden = true;
+      profileHoverId = null; profileMarker = null;
+      if (!profileOks.length) profileContext = null;
+      $('profile-open').disabled = false;
+      drawProfileOverlay();
+    }
+  });
+
+  function resetProfile() {
+    profileVersion++;
+    profileContext = null;
+    profileOks = [];
+    selectedOksKey = null;
+    activeProfile = null;
+    profileHoverId = null;
+    profileMarker = null;
+    profileMapOverlay?.remove(); profileMapOverlay = null;
+    $('profile-controls').hidden = true;
+    $('profile-panel').hidden = true;
+    $('profile-oks').replaceChildren();
+    profileView.clear();
+  }
+
+  async function readProfileResponse(url) {
+    const response = await fetch(url);
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.message || body.error || 'Профиль недоступен');
+    return body;
+  }
+
+  function profileUrl() {
+    return '/api/v1/tracing/jobs/' + encodeURIComponent(jobId)
+      + '/profile?variant_id=' + encodeURIComponent(currentVariant);
+  }
+
+  function syncProfile() {
+    if (mode !== 'depth' || !jobId || !currentVariant) {
+      resetProfile();
+      return;
+    }
+    const context = jobId + '/' + currentVariant;
+    if (profileContext === context) { drawProfileOverlay(); return; }
+    const previousKey = selectedOksKey;
+    resetProfile();
+    profileContext = context;
+    selectedOksKey = previousKey;
+    const version = ++profileVersion;
+    $('profile-controls').hidden = false;
+    $('profile-oks').disabled = true;
+    $('profile-open').disabled = true;
+    $('profile-panel').hidden = false;
+    profileView.setMessage('Загрузка списка ОКС…');
+    readProfileResponse(profileUrl()).then(data => {
+      if (version !== profileVersion || context !== profileContext) return;
+      profileOks = data.oks || [];
+      profileOks.forEach(oks => {
+        const option = document.createElement('option');
+        option.value = oks.key;
+        option.textContent = 'ОКС ' + oks.label + (oks.connected ? '' : ' — не подключён');
+        option.disabled = !oks.connected;
+        $('profile-oks').appendChild(option);
+      });
+      const selected = profileOks.find(o => o.key === selectedOksKey && o.connected)
+        || profileOks.find(o => o.connected);
+      $('profile-oks').disabled = !selected;
+      $('profile-open').disabled = !selected;
+      if (!selected) { profileView.setMessage('В этом варианте нет подключённых ОКС.'); return; }
+      selectProfileOks(selected.key);
+    }).catch(error => {
+      if (version !== profileVersion) return;
+      profileView.setMessage('Не удалось загрузить профиль: ' + error.message);
+      $('profile-open').disabled = false;
+    });
+  }
+
+  function selectProfileOks(key) {
+    const choice = profileOks.find(o => o.key === key && o.connected);
+    if (!choice) return;
+    selectedOksKey = key;
+    $('profile-oks').value = key;
+    const version = ++profileVersion;
+    activeProfile = null; profileHoverId = null; profileMarker = null;
+    drawProfileOverlay();
+    $('profile-panel').hidden = false;
+    profileView.setMessage('Строим профиль до ОКС ' + choice.label + ' по сохранённой трассе…');
+    readProfileResponse(profileUrl() + '&oks_key=' + encodeURIComponent(key)).then(data => {
+      if (version !== profileVersion) return;
+      activeProfile = data;
+      profileView.setData(data);
+      drawProfileOverlay();
+    }).catch(error => {
+      if (version !== profileVersion) return;
+      profileView.setMessage('Не удалось построить профиль: ' + error.message);
+    });
+  }
+
+  $('profile-oks').addEventListener('change', () => selectProfileOks($('profile-oks').value));
+  $('profile-open').addEventListener('click', () => {
+    if (activeProfile) { profileView.setData(activeProfile); $('profile-panel').hidden = false; return; }
+    if (profileOks.some(oks => oks.key === selectedOksKey && oks.connected)) selectProfileOks(selectedOksKey);
+    else { profileContext = null; syncProfile(); }
+  });
+
+  function drawProfileOverlay() {
+    if (mode !== 'depth' || !profileOks.length) {
+      profileMapOverlay?.remove(); profileMapOverlay = null;
+      return;
+    }
+    // Hover/blur may occur between pointerdown and click on an OKS. Keep its
+    // element and keyboard focus; only a full map redraw detaches the overlay.
+    if (!profileMapOverlay || profileMapOverlay.parentNode !== svg) {
+      profileMapOverlay?.remove();
+      profileMapOverlay = el('g', { 'data-profile-overlay': 'true' });
+      profileMapOverlay.profilePaths = el('g', { 'pointer-events': 'none' }, profileMapOverlay);
+      profileMapOverlay.profilePoints = el('g', {}, profileMapOverlay);
+      profileMapOverlay.profileMarkers = el('g', { 'pointer-events': 'none' }, profileMapOverlay);
+      profileMapOverlay.pointNodes = new Map();
+    }
+    const pathGroup = profileMapOverlay.profilePaths;
+    pathGroup.replaceChildren();
+    (activeProfile?.segments || []).forEach(segment => {
+      el('polyline', { points: linePts(segment.coordinates), fill: 'none', stroke: '#008878',
+        'stroke-width': 5, opacity: .8, 'vector-effect': 'non-scaling-stroke' }, pathGroup);
+      if (segment.id === profileHoverId) el('polyline', {
+        points: linePts(segment.coordinates), fill: 'none', stroke: '#ff9b21',
+        'stroke-width': 7, 'vector-effect': 'non-scaling-stroke', 'data-profile-active-segment': segment.id
+      }, pathGroup);
+    });
+    const presentKeys = new Set();
+    profileOks.forEach(oks => {
+      if (!oks.coordinates) return;
+      presentKeys.add(oks.key);
+      let entry = profileMapOverlay.pointNodes.get(oks.key);
+      if (!entry) {
+        const point = el('circle', { 'data-profile-oks': oks.key }, profileMapOverlay.profilePoints);
+        const title = el('title', {}, point);
+        point.addEventListener('pointerdown', event => event.stopPropagation());
+        point.addEventListener('click', event => { event.stopPropagation(); selectProfileOks(oks.key); });
+        point.addEventListener('keydown', event => {
+          if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectProfileOks(oks.key); }
+        });
+        entry = { point, title };
+        profileMapOverlay.pointNodes.set(oks.key, entry);
+      }
+      const [cx, cy] = toXY(...oks.coordinates);
+      const attrs = { cx, cy, r: oks.key === selectedOksKey ? 8 : 6,
+        fill: oks.key === selectedOksKey ? '#008878' : '#310F53', stroke: '#fff', 'stroke-width': 1.5,
+        role: 'button', tabindex: oks.connected ? 0 : -1,
+        'aria-label': 'Профиль ОКС ' + oks.label + (oks.connected ? '' : ': не подключён'),
+        'aria-disabled': String(!oks.connected), style: 'cursor:' + (oks.connected ? 'pointer' : 'default')
+      };
+      Object.entries(attrs).forEach(([name, value]) => entry.point.setAttribute(name, value));
+      entry.title.textContent = 'ОКС ' + oks.label;
+    });
+    profileMapOverlay.pointNodes.forEach((entry, key) => {
+      if (!presentKeys.has(key)) { entry.point.remove(); profileMapOverlay.pointNodes.delete(key); }
+    });
+    profileMapOverlay.profileMarkers.replaceChildren();
+    if (profileMarker) {
+      const [cx, cy] = toXY(...profileMarker);
+      el('circle', { cx, cy, r: 5, fill: '#ff9b21', stroke: '#fff', 'stroke-width': 2,
+        'pointer-events': 'none', 'data-profile-position': 'true' }, profileMapOverlay.profileMarkers);
+    }
+  }
+  // ---------- конец продольного профиля ----------
 
   // ---------- интерпретация стоимости (каскад факторов) ----------
   // руб/м и пропускная способность по таблице 1 техприложения
@@ -1233,8 +1428,18 @@
           });
           const hit = el('polyline', { points: linePts(g.coordinates), fill: 'none',
             stroke: 'transparent', 'stroke-width': 12 });
-          hit.addEventListener('mousemove', e => showTip(e, p, line));
-          hit.addEventListener('mouseleave', () => hideTip(line, p));
+          hit.addEventListener('mousemove', e => {
+            showTip(e, p, line);
+            if (vid === currentVariant && activeProfile) {
+              profileView.highlightSegment(p.id);
+              profileHoverId = p.id; drawProfileOverlay();
+            }
+          });
+          hit.addEventListener('mouseleave', () => {
+            hideTip(line, p);
+            profileView.highlightSegment(null);
+            profileHoverId = null; profileMarker = null; drawProfileOverlay();
+          });
         } else if (p.object_type === 'heat_chamber') {
           const [x, y] = toXY(g.coordinates[0], g.coordinates[1]);
           el('circle', { cx: x, cy: y, r: 5 + wExtra / 2, fill: color, stroke: '#fff', 'stroke-width': 1.4 });
@@ -1257,6 +1462,7 @@
     const far = prev && (Math.abs(Math.log(vb.w / target.w)) > 0.3
         || Math.hypot(vb.x - target.x, vb.y - target.y) > target.w);
     if (far) flyTo(target); else { vb = target; applyVb(); }
+    drawProfileOverlay();
   }
 
   // ---------- анимация вида ----------
@@ -1322,6 +1528,19 @@
     svg.setAttribute('viewBox', vb.x + ' ' + vb.y + ' ' + vb.w + ' ' + vb.h);
     scheduleTiles();
   }
+  // ---------- размер карты при открытии профиля ----------
+  let mapViewportWidth = svg.clientWidth;
+  new ResizeObserver(() => {
+    const width = svg.clientWidth, height = svg.clientHeight;
+    if (vb && width > 0 && height > 0 && mapViewportWidth > 0) {
+      cancelFly();
+      const scale = vb.w / mapViewportWidth;
+      const w = width * scale, h = height * scale;
+      vb = { x: vb.x + (vb.w - w) / 2, y: vb.y + (vb.h - h) / 2, w, h };
+      applyVb();
+    }
+    mapViewportWidth = width;
+  }).observe(svg);
   // ---------- рисование объекта-ограничения на карте ----------
   let drawMode = false, drawPts = [], drawPreview = null, inputModified = false;
   const drawBtn = $('draw-btn'), drawHint = $('draw-hint'), drawForm = $('draw-form');

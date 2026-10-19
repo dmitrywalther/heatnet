@@ -1,0 +1,49 @@
+.heatnet-profile {
+  flex: 0 0 auto; min-width: 0; max-height: 46vh; overflow: auto;
+  background: #fff; border-top: 1px solid #e4dcec; padding: 12px 18px 10px;
+  color: #1c1d22; font: 12px/1.4 "Segoe UI", system-ui, sans-serif;
+}
+.heatnet-profile[hidden] { display: none !important; }
+.hp-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.hp-titles { min-width: 0; }
+.hp-title { margin: 0; font-size: 15px; font-weight: 650; color: #310f53; overflow-wrap: anywhere; }
+.hp-subtitle { margin: 3px 0 0; color: #6e6a77; font-variant-numeric: tabular-nums; }
+.hp-stats { margin: 6px 0 2px; color: #310f53; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.hp-close { flex: none; padding: 5px 9px; font-size: 12px; font-weight: 500; }
+.hp-conventions { margin: 5px 0 2px; color: #6e6a77; font-size: 11px; }
+.hp-chart-wrap { overflow-x: auto; }
+.hp-chart { display: block; width: 100%; min-width: 560px; height: auto; max-height: 258px; overflow: visible; }
+.hp-axis-label { fill: #6e6a77; font-size: 11px; font-variant-numeric: tabular-nums; }
+.hp-surface-label { fill: #527763; font-size: 10px; }
+.hp-grid { stroke: #ece8f0; stroke-width: 1; }
+.hp-ground { stroke: #769583; stroke-width: 1.6; }
+.hp-pipe-band { fill: #dfc9ee; fill-opacity: .75; stroke: none; }
+.hp-pipe-top { stroke: #6a238f; stroke-width: 2.8; fill: none; }
+.hp-hit { stroke: transparent; stroke-width: 16; fill: none; }
+.hp-segment { cursor: crosshair; outline: none; }
+.hp-segment.active .hp-pipe-top, .hp-segment:focus-visible .hp-pipe-top { stroke: #ff0053; stroke-width: 4; }
+.hp-segment.active .hp-pipe-band, .hp-segment:focus-visible .hp-pipe-band { fill: #ffabc5; }
+.hp-obstacle { outline: none; cursor: help; }
+.hp-obstacle-footprint { fill: #a47c39; opacity: .65; }
+.hp-obstacle-band { fill: #b19a75; fill-opacity: .7; stroke: #8e744e; stroke-width: 1; }
+.hp-obstacle-level { stroke: #8e744e; stroke-width: 3; }
+.hp-obstacle-threshold { stroke: #ba7818; stroke-width: 2.5; stroke-dasharray: 5 3; }
+.hp-obstacle:hover .hp-obstacle-footprint, .hp-obstacle:focus-visible .hp-obstacle-footprint { fill: #ff0053; opacity: 1; }
+.hp-cursor { stroke: #ff0053; stroke-width: 1; stroke-dasharray: 3 3; pointer-events: none; }
+.hp-cursor-dot { fill: #ff0053; stroke: white; stroke-width: 1.5; pointer-events: none; }
+.hp-detail { min-height: 30px; padding: 6px 9px; background: #f7f3fa; border-radius: 5px; color: #310f53;
+  font-size: 12px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.hp-legend { margin: 5px 0 0; color: #6a238f; font-size: 11px; }
+.hp-obstacles { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.hp-obstacle-button { padding: 3px 7px; border: 1px solid #e4d8c5; border-radius: 4px;
+  background: #fffaf2; color: #745529; font-size: 11px; font-weight: 500; }
+.hp-obstacle-button:hover, .hp-obstacle-button:focus-visible { border-color: #a47c39; background: #fff2d9; }
+.hp-note { margin: 3px 0 0; color: #6e6a77; font-size: 10.5px; }
+.hp-help { margin-top: 5px; }
+.hp-help > summary { color: #6e6a77; cursor: pointer; font-size: 11px; }
+.hp-help > summary:focus-visible { outline: 2px solid #520978; outline-offset: 2px; }
+.hp-message { margin: 14px 0 6px; color: #6e6a77; }
+@media (max-width: 700px) {
+  .heatnet-profile { padding: 10px; max-height: 45vh; }
+  .hp-title { font-size: 14px; }
+}
