@@ -7,6 +7,8 @@ import org.locationtech.jts.geom.Point;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.LinkedHashSet;
+import java.util.Set;
 
 /**
  * Разобранный входной набор. Геометрии хранятся в метрической проекции
@@ -15,6 +17,9 @@ import java.util.List;
  * без потерь обратного преобразования.
  */
 public class InputModel {
+
+    /** Имена всех входных объектов, включая дополнительные игнорируемые типы. */
+    public final Set<Object> inputIds = new LinkedHashSet<>();
 
     public static class SourcePoint {
         public Object id;

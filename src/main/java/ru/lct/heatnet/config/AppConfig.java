@@ -2,11 +2,10 @@ package ru.lct.heatnet.config;
 
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.info.Info;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
-
-import java.util.concurrent.Executor;
 
 @Configuration
 public class AppConfig {
@@ -36,11 +35,19 @@ public class AppConfig {
 
     /** Пул расчётных задач: тяжёлые расчёты не блокируют HTTP-потоки. */
     @Bean(name = "tracingExecutor")
-    public Executor tracingExecutor() {
+    public ThreadPoolTaskExecutor tracingExecutor(
+            @Value("${heatnet.tracing.workers:1}") int workers,
+            @Value("${heatnet.tracing.queue-capacity:100}") int queueCapacity) {
+        if (workers < 1) {
+            throw new IllegalArgumentException("heatnet.tracing.workers должен быть >= 1");
+        }
+        if (queueCapacity < 0) {
+            throw new IllegalArgumentException("heatnet.tracing.queue-capacity должен быть >= 0");
+        }
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-        executor.setCorePoolSize(2);
-        executor.setMaxPoolSize(4);
-        executor.setQueueCapacity(100);
+        executor.setCorePoolSize(workers);
+        executor.setMaxPoolSize(workers);
+        executor.setQueueCapacity(queueCapacity);
         executor.setThreadNamePrefix("tracing-");
         executor.initialize();
         return executor;

@@ -17,6 +17,7 @@
     --card: #FFFFFF;
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html, body { height: 100%; }
   body {
     margin: 0; font: 14px/1.45 "Segoe UI", system-ui, sans-serif;
@@ -57,6 +58,8 @@
   }
   #rules-editor { max-height: 300px; overflow-y: auto; border: 1px solid var(--line);
     border-radius: 6px; }
+  #rules-controls { border: 0; margin: 0; padding: 0; min-width: 0; }
+  #rules-controls:disabled { opacity: .55; }
   .rule-row { border-bottom: 1px solid var(--line); }
   .rule-row:last-child { border-bottom: none; }
   .rule-head {
@@ -97,6 +100,12 @@
   #status { font-size: 13px; color: var(--muted); min-height: 18px; }
   #status.err { color: #B0413E; }
   #status.ok { color: #0E7A4E; }
+  #status.warn { color: #865C16; }
+  button:disabled { opacity: .6; cursor: default; }
+  #diagnostics { margin-top: 10px; padding: 10px; background: #FFF7E6;
+    border: 1px solid #E9D3A5; border-radius: 8px; font-size: 12px; max-height: 260px; overflow-y: auto; }
+  #diagnostics ul { margin: 8px 0 0; padding-left: 18px; }
+  #diagnostics li + li { margin-top: 8px; }
   .variants { display: flex; flex-direction: column; gap: 6px; }
   .variant {
     text-align: left; padding: 8px 10px; border-radius: 8px; font-weight: 500;
@@ -247,12 +256,18 @@
       <div class="label">2 · Справочник ограничений</div>
       <div class="sub">Правила таблицы 2 можно править для этого расчёта: раскройте тип
         или добавьте новый — изменения применяются поверх встроенных.</div>
+      <div><button class="ghost" id="rules-choose">Загрузить YAML</button>
+        <button class="ghost" id="rules-use-editor" hidden>Вернуться к редактору</button></div>
+      <input id="rules-file" type="file" accept=".yaml,.yml" hidden>
+      <div id="rules-file-status" class="sub" role="status" hidden></div>
+      <fieldset id="rules-controls" aria-label="Редактор правил">
       <div id="rules-editor" aria-label="Справочник ограничений"></div>
       <div id="rules-add">
         <input id="new-type" placeholder="новый тип (латиницей), напр. metro"
                pattern="[a-z][a-z0-9_]*" spellcheck="false">
         <button class="ghost" id="add-type">Добавить</button>
       </div>
+      </fieldset>
       <div><button class="ghost" id="rules-reset">Сбросить к действующему</button></div>
     </section>
 
@@ -260,6 +275,7 @@
       <div class="label">3 · Расчёт</div>
       <button class="primary" id="run" disabled>Рассчитать варианты</button>
       <div id="status"></div>
+      <div id="diagnostics" role="status" hidden></div>
     </section>
 
     <section class="card" id="results" hidden>
@@ -310,6 +326,7 @@
   </div>
 </main>
 
+<script src="geojson-input.js"></script>
 <script>
 (function () {
   'use strict';
@@ -320,6 +337,8 @@
   const fmtM = n => new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 }).format(n) + ' м';
 
   let inputFile = null;
+  let inputText = null;    // исходный текст сохраняет точные числовые ID и нагрузки
+  let addedInputFeatures = [];
   let baseData = null;      // распарсенный входной набор (для подложки)
   let jobId = null;
   let modeData = { '2d': null, depth: null };   // FeatureCollection результатов
@@ -425,18 +444,30 @@
   fileInput.addEventListener('change', () => { if (fileInput.files.length) setFile(fileInput.files[0]); });
 
   function setFile(f) {
+    invalidateCalculation();
     inputFile = f;
+    inputText = null;
+    addedInputFeatures = [];
     baseData = null;
     $('filemeta').textContent = f.name + ' · ' + (f.size / 1024 / 1024).toFixed(2) + ' МБ';
     $('input-stats').hidden = true;
-    $('run').disabled = false;
+    updateRunState();
     drop.classList.add('armed');
     drop.innerHTML = '<b>' + escapeHtml(f.name) + '</b><br>нажмите, чтобы заменить';
     inputModified = false;
     setDrawMode(false);
     $('draw-btn').hidden = true;
+    status('Файл выбран — запустите расчёт');
     if (f.size <= 64 * 1024 * 1024) {
-      f.text().then(t => { try { baseData = JSON.parse(t); renderInputStats(); drawAll(); $('draw-btn').hidden = false; } catch (e) { /* нарисуем после расчёта */ } });
+      f.text().then(t => {
+        if (inputFile !== f) return;
+        try {
+          baseData = JSON.parse(t);
+          inputText = t;
+          renderInputStats(); drawAll();
+          $('draw-btn').hidden = !Array.isArray(baseData.features);
+        } catch (e) { /* нарисуем после расчёта */ }
+      });
     } else {
       status('Файл больше 64 МБ — подложка не отображается, результат будет показан', '');
     }
@@ -497,6 +528,27 @@
   // показанные поля, остальные (vertical и др.) сохраняются как есть.
   // YAML собирается сериализатором — синтаксическая ошибка невозможна.
   let rulesModel = null;
+  let rulesFile = null;
+  let rulesLoading = false;
+  let rulesLoadVersion = 0;
+  function setRulesFile(file) {
+    rulesFile = file;
+    $('rules-controls').disabled = !!file || rulesLoading;
+    $('rules-use-editor').hidden = !file;
+    $('rules-file-status').hidden = !file;
+    $('rules-file-status').textContent = file
+      ? file.name + ' — файл будет передан без изменений. Правила редактора сейчас не применяются; YAML проверит сервер перед расчётом.'
+      : '';
+    if (!file) $('rules-file').value = '';
+    invalidateCalculation();
+    drawAll();
+    status(file ? 'YAML выбран — запустите расчёт' : 'Используются правила редактора — запустите расчёт');
+  }
+  $('rules-choose').addEventListener('click', () => $('rules-file').click());
+  $('rules-file').addEventListener('change', () => {
+    if ($('rules-file').files.length) setRulesFile($('rules-file').files[0]);
+  });
+  $('rules-use-editor').addEventListener('click', () => setRulesFile(null));
   const openTypes = new Set();
   const RULE_RU = { oks: 'здания (ОКС)', park: 'парки', social_area: 'соцобъекты',
     prohibited_site: 'запретные территории', water: 'вода', railway: 'железная дорога',
@@ -504,11 +556,35 @@
     power_cable: 'силовые кабели', unknown_default: 'неизвестные типы (по умолчанию)' };
 
   function loadRules() {
-    fetch('/api/v1/rules/json').then(r => r.json()).then(m => {
+    const version = ++rulesLoadVersion;
+    rulesLoading = true;
+    $('rules-controls').disabled = true;
+    if (!rulesFile) $('run').disabled = true;
+    return fetch('/api/v1/rules/json').then(r => {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(m => {
+      if (version !== rulesLoadVersion) return;
       rulesModel = m; openTypes.clear(); renderRules();
+      if (!rulesFile && inputFile) status('Действующий справочник загружен — запустите расчёт');
+    }).catch(e => {
+      if (version !== rulesLoadVersion) return;
+      rulesModel = null;
+      renderRules();
+      if (!rulesFile) status('Не удалось загрузить справочник: ' + e.message
+        + '. Повторите сброс или загрузите YAML.', 'err');
+    }).finally(() => {
+      if (version !== rulesLoadVersion) return;
+      rulesLoading = false;
+      $('rules-controls').disabled = !!rulesFile;
+      updateRunState();
     });
   }
-  $('rules-reset').addEventListener('click', loadRules);
+  $('rules-reset').addEventListener('click', () => {
+    setRulesFile(null);
+    loadRules();
+    status('Загрузка действующего справочника…');
+  });
   loadRules();
 
   function renderRules() {
@@ -584,7 +660,7 @@
       numField(rule, 'min_distance', 'мин. отступ, м', '0.1', body);
     }
     if (rule.mode === 'special') {
-      numField(rule, 'k_spec', 'Kспец (1…1.75)', '0.05', body);
+      numField(rule, 'k_spec', 'Kспец (≥1)', '0.05', body);
       numField(rule, 'special_margin', 'граница спецучастка, м', '0.5', body);
       numField(rule, 'min_angle', 'мин. угол пересечения, °', '5', body, { placeholder: 'нет' });
       numField(rule, 'own_half_width', 'полуширина объекта, м', '0.05', body, { placeholder: '0' });
@@ -638,59 +714,166 @@
 
   // ---------- запуск расчёта ----------
   const statusEl = $('status');
+  let requestVersion = 0;
+  let calculationRunning = false;
   function status(text, cls) { statusEl.textContent = text; statusEl.className = cls || ''; }
+  function updateRunState() {
+    $('run').disabled = !inputFile || calculationRunning || (!rulesFile && (rulesLoading || !rulesModel));
+  }
+  // Серверная задача может завершиться позже: старый ответ не относится к новому входу.
+  function invalidateCalculation() {
+    requestVersion++;
+    calculationRunning = false;
+    jobId = null;
+    modeData = { '2d': null, depth: null };
+    currentVariant = null;
+    compareVariant = null;
+    cancelFly();
+    svg.innerHTML = '';
+    tileCache.clear();
+    $('hint').style.display = '';
+    $('legend').hidden = true;
+    $('tooltip').style.display = 'none';
+    $('results').hidden = true;
+    showDiagnostics([]);
+    setDepthAvailable(false);
+    updateRunState();
+  }
+
+  function showDiagnostics(items) {
+    const box = $('diagnostics');
+    box.textContent = '';
+    box.hidden = !items || items.length === 0;
+    if (box.hidden) return;
+    const title = document.createElement('strong');
+    title.textContent = 'Исключённые варианты';
+    box.appendChild(title);
+    const list = document.createElement('ul');
+    items.forEach(item => {
+      const row = document.createElement('li');
+      const modeLabel = item.mode === 'depth' ? 'режим глубины' : 'базовый режим';
+      row.textContent = (item.variant_id || 'Вариант') + ' (' + modeLabel + '): '
+        + (item.message || 'Вариант не прошёл проверку допустимости.');
+      if (item.segment_ids && item.segment_ids.length) {
+        row.textContent += ' Участки: ' + item.segment_ids.slice(0, 5).join(', ')
+          + (item.segment_ids.length > 5 ? ' и ещё ' + (item.segment_ids.length - 5) : '') + '.';
+      }
+      list.appendChild(row);
+    });
+    box.appendChild(list);
+  }
+
+  function setDepthAvailable(available) {
+    $('mode-depth').disabled = !available;
+    const download = document.querySelector('[data-dl="result-depth"]');
+    download.disabled = !available;
+    const reason = available ? '' : 'Допустимый результат режима глубины недоступен';
+    $('mode-depth').title = reason;
+    download.title = reason;
+  }
 
   $('run').addEventListener('click', () => {
-    if (!inputFile) return;
+    if (!inputFile || calculationRunning || (!rulesFile && (rulesLoading || !rulesModel))) return;
+    invalidateCalculation();
+    const version = requestVersion;
+    calculationRunning = true;
     $('run').disabled = true;
     $('results').hidden = true;
     modeData = { '2d': null, depth: null };
+    showDiagnostics([]);
+    setDepthAvailable(false);
+    drawAll();
     const form = new FormData();
     if (inputModified && baseData) {
-      // на карте добавлены объекты — отправляем изменённый набор
-      form.append('file', new Blob([JSON.stringify(baseData)],
-          { type: 'application/geo+json' }), inputFile.name);
+      // Дописываем новые ограничения, сохраняя исходные числа без JS-округления.
+      try {
+        form.append('file', new Blob([HeatnetInput.appendFeatures(inputText, addedInputFeatures)],
+            { type: 'application/geo+json' }), inputFile.name);
+      } catch (e) {
+        status('Ошибка подготовки GeoJSON: ' + e.message, 'err');
+        calculationRunning = false;
+        $('run').disabled = false;
+        return;
+      }
     } else {
       form.append('file', inputFile);
     }
-    const rulesText = rulesYaml();
-    if (rulesText) form.append('rules', new Blob([rulesText], { type: 'text/yaml' }), 'rules.yml');
+    if (rulesFile) form.append('rules', rulesFile, rulesFile.name);
+    else {
+      const rulesText = rulesYaml();
+      if (rulesText) form.append('rules', new Blob([rulesText], { type: 'text/yaml' }), 'rules.yml');
+    }
     status('Загрузка файла…');
     const started = Date.now();
     fetch('/api/v1/tracing/jobs', { method: 'POST', body: form })
       .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e)))
-      .then(j => { jobId = j.job_id; poll(started); })
-      .catch(e => { status('Ошибка: ' + (e.message || e.error || JSON.stringify(e)), 'err'); $('run').disabled = false; });
+      .then(j => {
+        if (version !== requestVersion) return;
+        jobId = j.job_id;
+        poll(started, jobId, version);
+      })
+      .catch(e => {
+        if (version !== requestVersion) return;
+        calculationRunning = false;
+        status('Ошибка: ' + (e.message || e.error || JSON.stringify(e)), 'err'); $('run').disabled = false;
+      });
   });
 
-  function poll(started) {
-    fetch('/api/v1/tracing/jobs/' + jobId).then(r => r.json()).then(j => {
+  function poll(started, id = jobId, version = requestVersion) {
+    if (version !== requestVersion || id !== jobId) return;
+    fetch('/api/v1/tracing/jobs/' + id).then(r => r.json()).then(j => {
+      if (version !== requestVersion || id !== jobId) return;
       const sec = ((Date.now() - started) / 1000).toFixed(0);
       if (j.status === 'DONE') {
-        status('Готово за ' + sec + ' с', 'ok');
-        $('run').disabled = false;
-        loadResults();
+        const hasDiagnostics = j.diagnostics && j.diagnostics.length > 0;
+        showDiagnostics(j.diagnostics || []);
+        status('Готово за ' + sec + ' с' + (hasDiagnostics ? ', с замечаниями' : ''),
+          hasDiagnostics ? 'warn' : 'ok');
+        loadResults(j, id, version);
       } else if (j.status === 'ERROR') {
         status('Ошибка расчёта: ' + (j.error || ''), 'err');
+        showDiagnostics(j.diagnostics || []);
+        $('results').hidden = true;
+        setDepthAvailable(false);
+        calculationRunning = false;
         $('run').disabled = false;
       } else {
         status('Расчёт… ' + sec + ' с (маршруты, диаметры, варианты)');
-        setTimeout(() => poll(started), 700);
+        setTimeout(() => poll(started, id, version), 700);
       }
-    }).catch(() => setTimeout(() => poll(started), 1200));
+    }).catch(() => {
+      if (version === requestVersion && id === jobId) setTimeout(() => poll(started, id, version), 1200);
+    });
   }
 
-  function loadResults() {
+  function loadResults(job = {}, id = jobId, version = requestVersion) {
     Promise.all([
-      fetch('/api/v1/tracing/jobs/' + jobId + '/result').then(r => r.json()),
-      fetch('/api/v1/tracing/jobs/' + jobId + '/result-depth').then(r => r.ok ? r.json() : null).catch(() => null)
+      fetch('/api/v1/tracing/jobs/' + id + '/result').then(r => {
+        if (!r.ok) throw new Error('Базовый результат недоступен');
+        return r.json();
+      }),
+      job.depth_available === false ? Promise.resolve(null)
+        : fetch('/api/v1/tracing/jobs/' + id + '/result-depth').then(r => r.ok ? r.json() : null).catch(() => null)
     ]).then(([res, depth]) => {
+      if (version !== requestVersion || id !== jobId) return;
+      calculationRunning = false;
+      $('run').disabled = false;
       modeData['2d'] = res;
-      modeData.depth = depth;
+      const hasDepth = groupVariants(depth).length > 0;
+      modeData.depth = hasDepth ? depth : null;
+      setDepthAvailable(hasDepth);
       mode = '2d';
+      $('mode-2d').classList.toggle('active', true);
+      $('mode-depth').classList.toggle('active', false);
       $('results').hidden = false;
       renderVariantList();
       drawAll();
+    }).catch(e => {
+      if (version !== requestVersion || id !== jobId) return;
+      calculationRunning = false;
+      $('run').disabled = false;
+      $('results').hidden = true;
+      status('Не удалось загрузить результат: ' + e.message, 'err');
     });
   }
 
@@ -1205,11 +1388,11 @@
       return [Math.round(lon * 1e9) / 1e9, Math.round(lat * 1e9) / 1e9];
     });
     ring.push(ring[0]);
-    const maxId = baseData.features.reduce((m, f) =>
-      typeof f.properties.id === 'number' ? Math.max(m, f.properties.id) : m, 0);
-    baseData.features.push({ type: 'Feature',
-      properties: { id: maxId + 1, object_type: 'restriction', restriction_type: type },
-      geometry: { type: 'Polygon', coordinates: [ring] } });
+    const feature = { type: 'Feature',
+      properties: { id: HeatnetInput.nextRestrictionId(baseData.features), object_type: 'restriction', restriction_type: type },
+      geometry: { type: 'Polygon', coordinates: [ring] } };
+    baseData.features.push(feature);
+    addedInputFeatures.push(feature);
     inputModified = true;
     setDrawMode(false);
     renderInputStats();

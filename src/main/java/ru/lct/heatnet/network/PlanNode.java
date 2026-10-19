@@ -42,6 +42,11 @@ public class PlanNode {
         this.utm = utm;
     }
 
+    /** Камера на исходной теплосети, для которой применим п. 13 разъяснений. */
+    public boolean isSourceConnection() {
+        return kind == Kind.EXISTING_CHAMBER || (kind == Kind.NEW_CHAMBER && splitPipeDu != null);
+    }
+
     public void addExempt(Set<Object> ids) {
         if (ids == null || ids.isEmpty()) {
             return;

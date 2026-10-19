@@ -31,7 +31,10 @@ public class SpecialObstacle {
      */
     public final Geometry proximityGeom;
     public final PreparedGeometry proximity;
-    /** Для полигональных — core ⊕ margin (зона спецучастка); для линейных null. */
+    /**
+     * Для полигональных — core ⊕ margin, вспомогательный контур узлов графа;
+     * фактический SPECIAL отмеряется вдоль трассы. Для линейных null.
+     */
     public final Geometry boundZone;
     public final PreparedGeometry boundZonePrep;
     /**

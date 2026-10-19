@@ -69,9 +69,13 @@ public class VariantPlanner {
     private static final double PIPE_SAMPLE_STEP = 10.0;
     private static final double CHAMBER_RULE_RADIUS = 10.0;
     private static final int MAX_CHAMBER_CONNECTIONS = 4;
+    private static final double SOURCE_TOPOLOGY_EPS = 1e-6;
+    private static final double MAX_SUPPORTED_FLOW = PipeTable.grades()
+            .get(PipeTable.grades().size() - 1).getCapacityTph();
 
     private final InputModel input;
     private final ObstacleIndex obstacles;
+    private final EntrySelectionPolicy entrySelectionPolicy;
     /**
      * Расчётный габарит для проверки отступов: ДУ по суммарному расходу всех
      * точек подключения (максимум, который может собрать общая магистраль),
@@ -81,6 +85,8 @@ public class VariantPlanner {
      * перестроения после подбора фактических диаметров.
      */
     private final PipeGrade clearanceGrade;
+    /** Проверка суммарной нагрузки нужна только при возможном превышении максимума таблицы. */
+    private final boolean capacityChecksRequired;
 
     /** Существующая степень камер (число примыкающих существующих участков). */
     private final Map<Object, Integer> chamberDegrees = new HashMap<>();
@@ -92,14 +98,20 @@ public class VariantPlanner {
             new org.locationtech.jts.index.strtree.STRtree();
 
     public VariantPlanner(InputModel input, ObstacleIndex obstacles) {
+        this(input, obstacles, EntrySelectionPolicy.DEFAULT);
+    }
+
+    VariantPlanner(InputModel input, ObstacleIndex obstacles, EntrySelectionPolicy entrySelectionPolicy) {
         this.input = input;
         this.obstacles = obstacles;
+        this.entrySelectionPolicy = java.util.Objects.requireNonNull(entrySelectionPolicy);
         double totalFlow = 0;
         for (InputModel.OksPoint oks : input.oksPoints) {
             totalFlow += oks.flowTph;
         }
         PipeGrade byTotal = PipeTable.minGradeForFlow(totalFlow);
         this.clearanceGrade = byTotal.getDu() > 400 ? PipeTable.byDu(400) : byTotal;
+        this.capacityChecksRequired = !Double.isFinite(totalFlow) || totalFlow > MAX_SUPPORTED_FLOW;
         for (InputModel.ExistingPipe pipe : input.pipes) {
             pipesById.put(pipe.id, pipe);
             pipeIndex.insert(pipe.utm.getEnvelopeInternal(), pipe);
@@ -168,13 +180,200 @@ public class VariantPlanner {
      */
     public boolean reconnect(NetworkPlan plan, InputModel.OksPoint oks) {
         GradeContext ctx = obstacles.forGrade(clearanceGrade);
+        return connectOks(plan, oks, Strategy.SHARED, null, ctx, validatorFor(plan, ctx));
+    }
+
+    private EdgeValidator validatorFor(NetworkPlan plan, GradeContext ctx) {
         EdgeValidator validator = new EdgeValidator(ctx);
         for (PlanEdge built : plan.edges) {
             if (built.coords.size() >= 2) {
                 validator.addBarrier(GeoUtil.polyline(built.coords));
             }
         }
-        return connectOks(plan, oks, Strategy.SHARED, null, ctx, validator);
+        return validator;
+    }
+
+    public static final class ReconnectCandidate {
+        public final NetworkPlan plan;
+        public final boolean alternativeEntry;
+
+        ReconnectCandidate(NetworkPlan plan, boolean alternativeEntry) {
+            this.plan = plan;
+            this.alternativeEntry = alternativeEntry;
+        }
+    }
+
+    /**
+     * Независимые пробы для полной оценки сети. Входной план уже без ветви ОКС
+     * и не изменяется. Обычный reconnect сохраняет прежние fallback; до трёх
+     * дополнительных близких нормалей проверяются строго по отдельности.
+     */
+    public List<ReconnectCandidate> reconnectCandidates(NetworkPlan disconnectedPlan,
+                                                        InputModel.OksPoint oks) {
+        List<ReconnectCandidate> candidates = new ArrayList<>();
+        if (!supportedIndividualFlow(oks.flowTph)) return candidates;
+        NetworkPlan ordinary = disconnectedPlan.copy();
+        Coordinate ordinaryDirection = null;
+        if (reconnect(ordinary, oks)) {
+            candidates.add(new ReconnectCandidate(ordinary, false));
+            ordinaryDirection = terminalDirection(ordinary, oks.id);
+        }
+        if (entrySelectionPolicy.maxAlternativeEntries == 0) {
+            return candidates;
+        }
+
+        GradeContext ctx = obstacles.forGrade(clearanceGrade);
+        ApproachOptions options = approachOptions(disconnectedPlan, oks, Strategy.SHARED,
+                ctx, validatorFor(disconnectedPlan, ctx));
+        if (options == null || !options.geometry.hasTail() || options.normals.isEmpty()) {
+            return candidates;
+        }
+        OksApproach approach = options.geometry;
+        Map<Coordinate, Double> internal = new HashMap<>();
+        for (Coordinate start : options.normals) {
+            internal.put(start, approach.internalLength(start));
+        }
+        double minInternal = internal.values().stream().mapToDouble(Double::doubleValue).min().orElseThrow();
+        List<Coordinate> ordered = new ArrayList<>(options.normals);
+        ordered.sort(Comparator.comparingDouble((Coordinate c) -> internal.get(c))
+                .thenComparingDouble(c -> c.x).thenComparingDouble(c -> c.y));
+        Coordinate p = oks.utm.getCoordinate();
+        int attempted = 0;
+        for (Coordinate start : ordered) {
+            if (internal.get(start) > minInternal + entrySelectionPolicy.extraInternalLengthM + 1e-6) {
+                break;
+            }
+            if (sameEntryDirection(p, start, ordinaryDirection)) {
+                continue;
+            }
+            if (attempted++ >= entrySelectionPolicy.maxAlternativeEntries) {
+                break;
+            }
+            NetworkPlan trial = disconnectedPlan.copy();
+            if (connectOks(trial, oks, Strategy.SHARED, null, ctx,
+                    validatorFor(trial, ctx), List.of(start))) {
+                candidates.add(new ReconnectCandidate(trial, true));
+            }
+        }
+        return candidates;
+    }
+
+    /** Ближайшая к P вершина конечного ребра; сохраняет направление после фаски. */
+    private Coordinate terminalDirection(NetworkPlan plan, Object oksId) {
+        for (PlanNode node : plan.nodes) {
+            if (node.kind == PlanNode.Kind.OKS && oksId.equals(node.inputId)) {
+                List<PlanEdge> incident = plan.incident(node);
+                if (incident.size() == 1) {
+                    List<Coordinate> coords = incident.get(0).coordsFrom(node);
+                    return coords.size() > 1 ? coords.get(1) : null;
+                }
+            }
+        }
+        return null;
+    }
+
+    private boolean sameEntryDirection(Coordinate p, Coordinate a, Coordinate b) {
+        if (b == null) {
+            return false;
+        }
+        double ax = a.x - p.x, ay = a.y - p.y;
+        double bx = b.x - p.x, by = b.y - p.y;
+        double scale = Math.hypot(ax, ay) * Math.hypot(bx, by);
+        return scale > 1e-12 && ax * bx + ay * by > 0
+                && Math.abs(ax * by - ay * bx) <= 1e-8 * scale;
+    }
+
+    private static final class DirectNormalTie {
+        final TieCandidate tie;
+        final EdgeValidator.EdgeCheck check;
+        DirectNormalTie(TieCandidate tie, EdgeValidator.EdgeCheck check) {
+            this.tie = tie;
+            this.check = check;
+        }
+    }
+
+    private static final class ApproachOptions {
+        final OksApproach geometry;
+        final List<Coordinate> normals = new ArrayList<>();
+        final List<Coordinate> ordinaryNormals = new ArrayList<>();
+        final List<Coordinate> fallback = new ArrayList<>();
+        final Map<Coordinate, List<DirectNormalTie>> direct = new HashMap<>();
+        ApproachOptions(OksApproach geometry) { this.geometry = geometry; }
+    }
+
+    private ApproachOptions approachOptions(NetworkPlan plan, InputModel.OksPoint oks, Strategy strategy,
+                                             GradeContext ctx, EdgeValidator validator) {
+        OksApproach available = OksApproach.build(oks, ctx, validator);
+        OksApproach staticApproach = strategy == Strategy.INDEPENDENT ? null
+                : OksApproach.build(oks, ctx, new EdgeValidator(ctx));
+        OksApproach geometry = available != null ? available : staticApproach;
+        if (geometry == null) return null;
+        ApproachOptions options = new ApproachOptions(geometry);
+        if (available != null) {
+            if (!available.hasTail() || available.hasPerpendicularApproaches()) {
+                options.ordinaryNormals.addAll(available.approachNodes);
+                options.fallback.addAll(available.fallbackApproachNodes);
+            } else {
+                options.fallback.addAll(available.approachNodes);
+            }
+        }
+        options.normals.addAll(options.ordinaryNormals);
+        if (staticApproach == null || !staticApproach.hasPerpendicularApproaches() || plan.edges.isEmpty()) {
+            return options;
+        }
+        Coordinate p = oks.utm.getCoordinate();
+        Envelope extent = new Envelope(p);
+        for (PlanEdge edge : plan.edges) for (Coordinate c : edge.coords) extent.expandToInclude(c);
+        double rayLength = 2 * Math.hypot(extent.getWidth(), extent.getHeight()) + 1;
+        PipeGrade costGrade = PipeTable.minGradeForFlow(oks.flowTph);
+        for (Coordinate start : staticApproach.approachNodes) {
+            double startDistance = p.distance(start);
+            Coordinate far = new Coordinate(p.x + (start.x - p.x) * rayLength / startDistance,
+                    p.y + (start.y - p.y) * rayLength / startDistance);
+            LineString ray = GeoUtil.segment(p, far);
+            List<DirectNormalTie> ties = new ArrayList<>();
+            for (PlanEdge edge : plan.edges) {
+                org.locationtech.jts.geom.Geometry crossings = ray.intersection(GeoUtil.polyline(edge.coords));
+                if (crossings.isEmpty() || crossings.getDimension() != 0) continue;
+                for (Coordinate crossing : crossings.getCoordinates()) {
+                    if (p.distance(crossing) < startDistance - 1e-6 || insideBlocking(crossing, ctx)) continue;
+                    TieCandidate tie = directTieCandidate(plan, edge, crossing, costGrade, ctx);
+                    if (tie == null || ties.stream().anyMatch(t -> t.tie.location.distance(tie.location) < 1e-6)) continue;
+                    EdgeValidator.EdgeCheck check = validator.check(tie.location, p, tie.exemptSpecialIds,
+                            staticApproach.ownRestrictionId, tie.location, tie.sourceConnectionAt());
+                    if (check.valid) ties.add(new DirectNormalTie(tie, check));
+                }
+            }
+            if (!ties.isEmpty()) {
+                options.direct.put(start, ties);
+                if (!options.normals.contains(start)) options.normals.add(start);
+            }
+        }
+        return options;
+    }
+
+    private TieCandidate directTieCandidate(NetworkPlan plan, PlanEdge edge, Coordinate crossing,
+                                             PipeGrade costGrade) {
+        return directTieCandidate(plan, edge, crossing, costGrade, obstacles.forGrade(clearanceGrade));
+    }
+
+    private TieCandidate directTieCandidate(NetworkPlan plan, PlanEdge edge, Coordinate crossing,
+                                             PipeGrade costGrade, GradeContext ctx) {
+        PlanNode node = plan.findNode(crossing);
+        if (node == null && edge.a.utm.distance(crossing) <= 1e-6) node = edge.a;
+        if (node == null && edge.b.utm.distance(crossing) <= 1e-6) node = edge.b;
+        if (node != null) {
+            // Grid lookup uses 1 mm; a direct normal may not be bent to a nearby grid match.
+            if (node.utm.distance(crossing) > 1e-6 || node.kind != PlanNode.Kind.NEW_CHAMBER
+                    || !canAddBranch(plan, node)) {
+                return null;
+            }
+            return new TieCandidate(TieCandidate.Kind.NEW_NETWORK_NODE, node.utm, node, 0, node.exemptSpecialIds);
+        }
+        if (edge.a.utm.distance(crossing) <= 1e-3 || edge.b.utm.distance(crossing) <= 1e-3) return null;
+        if (!canSplitEdge(edge, crossing, ctx)) return null;
+        return new TieCandidate(TieCandidate.Kind.NEW_NETWORK_EDGE_POINT, crossing, edge,
+                CostModel.chamberCost(costGrade.getDu()), null);
     }
 
     private List<InputModel.OksPoint> orderedOks(InsertionOrder order) {
@@ -221,28 +420,40 @@ public class VariantPlanner {
     private boolean connectOks(NetworkPlan plan, InputModel.OksPoint oks,
                                Strategy strategy, Set<Object> bannedTieRefs,
                                GradeContext ctx, EdgeValidator validator) {
-        PipeGrade costGrade = PipeTable.minGradeForFlow(oks.flowTph);
+        return connectOks(plan, oks, strategy, bannedTieRefs, ctx, validator, null);
+    }
 
-        OksApproach approach = OksApproach.build(oks, ctx, validator);
-        if (approach == null) {
+    private boolean connectOks(NetworkPlan plan, InputModel.OksPoint oks,
+                               Strategy strategy, Set<Object> bannedTieRefs,
+                               GradeContext ctx, EdgeValidator validator,
+                               List<Coordinate> forcedNormalStarts) {
+        if (!supportedIndividualFlow(oks.flowTph)) {
+            log.warn("ОКС {}: расход {} т/ч не поддерживается таблицей ДУ; точка останется неподключённой",
+                    oks.id, oks.flowTph);
+            return false;
+        }
+        PipeGrade costGrade = PipeTable.minGradeForFlow(oks.flowTph);
+        CapacitySnapshot capacity = capacityChecksRequired ? new CapacitySnapshot(plan) : null;
+
+        ApproachOptions options = approachOptions(plan, oks, strategy, ctx, validator);
+        if (options == null) {
             log.warn("ОКС {}: не найден допустимый подход к точке подключения", oks.id);
             return false;
         }
+        OksApproach approach = options.geometry;
 
         List<TieCandidate> allTargets =
                 buildCandidates(plan, ctx, costGrade, strategy, bannedTieRefs);
-        List<TieCandidate> targets = pruneTargets(allTargets, approach.approachNodes.get(0));
-        if (targets.isEmpty()) {
+        if (capacity != null) {
+            allTargets.removeIf(t -> !capacity.allows(t, oks.flowTph));
+            filterDirectCapacity(options, capacity, oks.flowTph);
+        }
+        if (allTargets.isEmpty() && options.direct.isEmpty()) {
             log.warn("ОКС {}: нет кандидатов точек присоединения", oks.id);
             return false;
         }
 
-        // стартовая стоимость каждого узла подхода — длина финального участка
         Coordinate p = oks.utm.getCoordinate();
-        double[] startCosts = new double[approach.approachNodes.size()];
-        for (int i = 0; i < startCosts.length; i++) {
-            startCosts[i] = approach.approachNodes.get(i).distance(p);
-        }
 
         // Независимые маршруты (вариант для сравнения, а не лидер рейтинга)
         // считаем в «быстром» режиме: бюджет раскрытий и ограничение длины
@@ -252,22 +463,32 @@ public class VariantPlanner {
         VisibilityRouter router = new VisibilityRouter(ctx, validator,
                 costGrade.getCostPerMeter(), fast ? 800 : 0, fast ? 300 : 0);
         VisibilityRouter.RoutedPath routed =
-                router.route(approach.approachNodes, startCosts, null, targets);
-        if (routed == null && allTargets.size() > targets.size()) {
-            // близкие цели могли оказаться заблокированными — пробуем без
-            // отсечения дальних кандидатов
-            routed = router.route(approach.approachNodes, startCosts, null, allTargets);
+                routeApproaches(router, forcedNormalStarts == null ? options.normals
+                        : forcedNormalStarts, approach, allTargets, options);
+        if (routed == null && forcedNormalStarts == null && !options.fallback.isEmpty()) {
+            routed = routeApproaches(router, options.fallback, approach, allTargets);
         }
-        if (routed == null && strategy == Strategy.INDEPENDENT) {
+        if (routed == null && forcedNormalStarts == null && strategy == Strategy.INDEPENDENT) {
             // коридор для независимого маршрута занят — допускаем совместное
             // подключение, чтобы не оставлять ОКС без сети
             List<TieCandidate> sharedTargets =
                     buildCandidates(plan, ctx, costGrade, Strategy.SHARED, bannedTieRefs);
-            routed = router.route(approach.approachNodes, startCosts, null, sharedTargets);
+            options = approachOptions(plan, oks, Strategy.SHARED, ctx, validator);
+            if (options != null) {
+                if (capacity != null) {
+                    sharedTargets.removeIf(t -> !capacity.allows(t, oks.flowTph));
+                    filterDirectCapacity(options, capacity, oks.flowTph);
+                }
+                approach = options.geometry;
+                routed = routeApproaches(router, options.normals, approach, sharedTargets, options);
+                if (routed == null && !options.fallback.isEmpty()) {
+                    routed = routeApproaches(router, options.fallback, approach, sharedTargets);
+                }
+            }
         }
         if (routed == null) {
             log.warn("ОКС {}: маршрут не найден ({} кандидатов, {} узлов подхода)",
-                    oks.id, targets.size(), approach.approachNodes.size());
+                    oks.id, allTargets.size(), approach.approachNodes.size());
             return false;
         }
 
@@ -276,14 +497,14 @@ public class VariantPlanner {
         List<Coordinate> coords = new ArrayList<>(routed.coords); // [tie ... approach]
         if (tie.kind == TieCandidate.Kind.PIPE_POINT && coords.size() >= 2) {
             Coordinate before = tie.location;
-            tie = refinePipeTie(tie, coords, validator);
+            tie = refinePipeTie(plan, tie, coords, validator);
             if (!tie.location.equals2D(before)) {
                 // перенос основания мог оставить объезд, который от новой точки
                 // врезки уже не нужен: спрямляем к самой дальней достижимой
                 // вершине маршрута
                 for (int j = coords.size() - 1; j >= 2; j--) {
                     EdgeValidator.EdgeCheck cut = validator.check(coords.get(j), coords.get(0),
-                            tie.exemptSpecialIds, null, tie.location);
+                            tie.exemptSpecialIds, null, tie.location, tie.sourceConnectionAt());
                     if (cut.valid) {
                         coords.subList(1, j).clear();
                         break;
@@ -302,10 +523,10 @@ public class VariantPlanner {
             coords.add(p);
         }
 
-        coords = postprocess(coords, validator, tie.location);
+        coords = postprocess(coords, validator, tie.location, tie.sourceConnectionAt());
 
         // --- интеграция в план ---
-        PlanNode tieNode = resolveTieNode(plan, tie);
+        PlanNode tieNode = resolveTieNode(plan, tie, ctx);
         if (tieNode == null) {
             return false;
         }
@@ -330,12 +551,208 @@ public class VariantPlanner {
         return true;
     }
 
+    private static boolean supportedIndividualFlow(double flow) {
+        return Double.isFinite(flow) && flow >= 0 && flow <= MAX_SUPPORTED_FLOW;
+    }
+
+    private static void filterDirectCapacity(ApproachOptions options, CapacitySnapshot capacity, double flow) {
+        for (List<DirectNormalTie> ties : options.direct.values()) {
+            ties.removeIf(t -> !capacity.allows(t.tie, flow));
+        }
+        options.direct.entrySet().removeIf(e -> e.getValue().isEmpty());
+        options.normals.removeIf(n -> !options.ordinaryNormals.contains(n) && !options.direct.containsKey(n));
+    }
+
+    /**
+     * Максимальная текущая нагрузка на пути до исходной сети. Несколько новых
+     * ветвей у исходной камеры проверяются отдельно: ограничение мощности
+     * существующей сети в этой расчётной модели не вводится.
+     */
+    private static final class CapacitySnapshot {
+        private final Map<PlanNode, Double> nodeMaxFlow = new HashMap<>();
+        private final Map<PlanEdge, Double> edgeMaxFlow = new HashMap<>();
+
+        CapacitySnapshot(NetworkPlan plan) {
+            Map<PlanNode, List<PlanEdge>> adjacent = new HashMap<>();
+            for (PlanEdge edge : plan.edges) {
+                adjacent.computeIfAbsent(edge.a, n -> new ArrayList<>()).add(edge);
+                adjacent.computeIfAbsent(edge.b, n -> new ArrayList<>()).add(edge);
+            }
+            Map<PlanNode, PlanEdge> parent = new HashMap<>();
+            List<PlanNode> order = new ArrayList<>();
+            Set<PlanNode> visited = new HashSet<>();
+            for (PlanNode node : plan.nodes) {
+                if (node.isSourceConnection()) {
+                    order.add(node);
+                    visited.add(node);
+                    nodeMaxFlow.put(node, 0.0);
+                }
+            }
+            for (int i = 0; i < order.size(); i++) {
+                PlanNode node = order.get(i);
+                for (PlanEdge edge : adjacent.getOrDefault(node, java.util.Collections.emptyList())) {
+                    PlanNode other = edge.other(node);
+                    if (visited.add(other)) {
+                        parent.put(other, edge);
+                        order.add(other);
+                    }
+                }
+            }
+            Map<PlanNode, Double> downstreamFlow = new HashMap<>();
+            Map<PlanEdge, Double> edgeFlow = new HashMap<>();
+            for (int i = order.size() - 1; i >= 0; i--) {
+                PlanNode node = order.get(i);
+                double flow = downstreamFlow.getOrDefault(node, 0.0);
+                if (node.kind == PlanNode.Kind.OKS && node.oksFlow != null) flow += node.oksFlow;
+                PlanEdge up = parent.get(node);
+                if (up != null) {
+                    edgeFlow.put(up, flow);
+                    downstreamFlow.merge(up.other(node), flow, Double::sum);
+                }
+            }
+            for (PlanNode node : order) {
+                PlanEdge up = parent.get(node);
+                if (up == null) continue;
+                double flow = edgeFlow.get(up);
+                double maximum = Double.isFinite(flow)
+                        ? Math.max(flow, nodeMaxFlow.get(up.other(node))) : Double.POSITIVE_INFINITY;
+                nodeMaxFlow.put(node, maximum);
+                edgeMaxFlow.put(up, maximum);
+            }
+        }
+
+        boolean allows(TieCandidate tie, double flow) {
+            switch (tie.kind) {
+                case EXISTING_CHAMBER:
+                case PIPE_POINT:
+                    return true;
+                case NEW_NETWORK_NODE:
+                    return flow + nodeMaxFlow.getOrDefault(tie.refId, Double.POSITIVE_INFINITY) <= MAX_SUPPORTED_FLOW;
+                case NEW_NETWORK_EDGE_POINT:
+                    return flow + edgeMaxFlow.getOrDefault(tie.refId, Double.POSITIVE_INFINITY) <= MAX_SUPPORTED_FLOW;
+                default:
+                    return false;
+            }
+        }
+    }
+
+    private VisibilityRouter.RoutedPath routeApproaches(VisibilityRouter router,
+                                                        List<Coordinate> starts, OksApproach approach,
+                                                        List<TieCandidate> allTargets) {
+        return routeApproaches(router, starts, approach, allTargets, null);
+    }
+
+    private VisibilityRouter.RoutedPath routeApproaches(VisibilityRouter router,
+                                                        List<Coordinate> starts, OksApproach approach,
+                                                        List<TieCandidate> allTargets, ApproachOptions options) {
+        // Сначала кратчайший доступный ввод внутри здания, затем цена наружного
+        // маршрута. Длина собственного буфера не должна менять порядок стен.
+        Map<Coordinate, Double> internalLengths = new HashMap<>();
+        for (Coordinate start : starts) {
+            internalLengths.put(start, approach.internalLength(start));
+        }
+        List<Coordinate> ordered = new ArrayList<>(starts);
+        ordered.sort(Comparator.comparingDouble(internalLengths::get));
+        Coordinate p = approach.oks.utm.getCoordinate();
+        // Даже короткий ввод может быть выгоднее соединить с сетью у другой
+        // стороны наружным обходом: цели сохраняем от всех подходов.
+        List<TieCandidate> targets = pruneTargets(allTargets, starts);
+        for (int from = 0; from < ordered.size();) {
+            int to = from + 1;
+            double shortest = internalLengths.get(ordered.get(from));
+            while (to < ordered.size()
+                    && internalLengths.get(ordered.get(to)) - shortest <= 1e-6) {
+                to++;
+            }
+            List<Coordinate> group = new ArrayList<>(ordered.subList(from, to));
+            if (options != null) group.removeIf(c -> !options.ordinaryNormals.contains(c));
+            double[] startCosts = new double[group.size()];
+            for (int i = 0; i < group.size(); i++) {
+                startCosts[i] = group.get(i).distance(p);
+            }
+            VisibilityRouter.RoutedPath routed = router.route(group, startCosts, null, targets);
+            if (routed == null && allTargets.size() > targets.size()) {
+                routed = router.route(group, startCosts, null, allTargets);
+            }
+            if (options != null) {
+                for (Coordinate start : ordered.subList(from, to)) {
+                    for (DirectNormalTie direct : options.direct.getOrDefault(start, List.of())) {
+                        VisibilityRouter.RoutedPath candidate = router.directPath(p, direct.tie, direct.check);
+                        if (routed == null || candidate.scoreCost < routed.scoreCost) routed = candidate;
+                    }
+                }
+            }
+            if (routed != null) {
+                return routed;
+            }
+            from = to;
+        }
+        return null;
+    }
+
+
+    /** Число направлений исходных труб, геометрически примыкающих к новой камере. */
+    private int existingPipeDegree(Coordinate location) {
+        Envelope envelope = new Envelope(location);
+        envelope.expandBy(SOURCE_TOPOLOGY_EPS);
+        @SuppressWarnings("unchecked")
+        List<InputModel.ExistingPipe> nearby = pipeIndex.query(envelope);
+        org.locationtech.jts.geom.Point point = GeoUtil.GF.createPoint(location);
+        int degree = 0;
+        for (InputModel.ExistingPipe pipe : nearby) {
+            LineString line = pipe.utm;
+            if (line.isEmpty() || line.distance(point) > SOURCE_TOPOLOGY_EPS) continue;
+            int ends = 0;
+            if (line.getCoordinateN(0).distance(location) <= SOURCE_TOPOLOGY_EPS) ends++;
+            if (line.getCoordinateN(line.getNumPoints() - 1).distance(location) <= SOURCE_TOPOLOGY_EPS) ends++;
+            // Конец занимает одно примыкание, транзитная труба — два.
+            // При совпадении нескольких исходных труб учитываем все направления.
+            degree += ends == 0 ? 2 : ends;
+        }
+        return degree;
+    }
+
+    /** Existing source-pipe directions are absent from the planned-edge degree. */
+    private boolean canAddBranch(NetworkPlan plan, PlanNode node) {
+        int existing;
+        if (node.kind == PlanNode.Kind.EXISTING_CHAMBER) {
+            existing = chamberDegrees.getOrDefault(node.inputId, 0);
+        } else if (node.kind == PlanNode.Kind.NEW_CHAMBER) {
+            existing = node.splitPipeDu == null ? 0 : existingPipeDegree(node.utm);
+        } else {
+            return false;
+        }
+        return existing + plan.degree(node) + 1 <= MAX_CHAMBER_CONNECTIONS;
+    }
 
     private PlanNode resolveTieNode(NetworkPlan plan, TieCandidate tie) {
+        return resolveTieNode(plan, tie, obstacles.forGrade(clearanceGrade));
+    }
+
+    private PlanNode resolveTieNode(NetworkPlan plan, TieCandidate tie, GradeContext ctx) {
+        PlanNode present = plan.findNode(tie.location);
+        if (present != null) {
+            // An occupied pipe sample is represented by its dedicated chamber
+            // candidate. Do not change its kind, split DU or charging metadata.
+            if (tie.kind == TieCandidate.Kind.PIPE_POINT
+                    || present.utm.distance(tie.location) > 1e-6
+                    || !canAddBranch(plan, present)) {
+                return null;
+            }
+            if (tie.kind == TieCandidate.Kind.NEW_NETWORK_NODE
+                    || tie.kind == TieCandidate.Kind.NEW_NETWORK_EDGE_POINT) {
+                return present.kind == PlanNode.Kind.NEW_CHAMBER ? present : null;
+            }
+            if (tie.kind == TieCandidate.Kind.EXISTING_CHAMBER
+                    && present.kind != PlanNode.Kind.EXISTING_CHAMBER) {
+                return null;
+            }
+        }
         switch (tie.kind) {
             case EXISTING_CHAMBER: {
                 InputModel.ExistingChamber chamber = findChamber(tie.refId);
-                if (chamber == null) {
+                if (chamber == null || chamberDegrees.getOrDefault(chamber.id, 0)
+                        + (present == null ? 0 : plan.degree(present)) + 1 > MAX_CHAMBER_CONNECTIONS) {
                     return null;
                 }
                 PlanNode node = plan.addNode(new PlanNode(PlanNode.Kind.EXISTING_CHAMBER,
@@ -348,6 +765,9 @@ public class VariantPlanner {
                 return node;
             }
             case PIPE_POINT: {
+                if (existingPipeDegree(tie.location) + 1 > MAX_CHAMBER_CONNECTIONS) {
+                    return null;
+                }
                 PlanNode node = plan.addNode(new PlanNode(PlanNode.Kind.NEW_CHAMBER, tie.location));
                 InputModel.ExistingPipe pipe = pipesById.get(tie.refId);
                 node.splitPipeDu = pipe != null ? pipe.diameter : null;
@@ -365,7 +785,7 @@ public class VariantPlanner {
                         break;
                     }
                 }
-                if (target == null) {
+                if (target == null || !canSplitEdge(target, tie.location, ctx)) {
                     return null;
                 }
                 return plan.splitEdge(target, tie.location, PlanNode.Kind.NEW_CHAMBER);
@@ -384,6 +804,14 @@ public class VariantPlanner {
         return null;
     }
 
+    private boolean canSplitEdge(PlanEdge edge, Coordinate point, GradeContext ctx) {
+        // ctx is the planning/retry clearance grade, not the cost grade of the
+        // incoming consumer. An already assigned larger trunk must keep its width.
+        GradeContext effective = edge.grade != null && edge.grade.getDu() > ctx.grade.getDu()
+                ? obstacles.forGrade(edge.grade) : ctx;
+        return EdgeSplitGuard.allows(edge, point, effective);
+    }
+
     private List<TieCandidate> buildCandidates(NetworkPlan plan, GradeContext ctx, PipeGrade assumed,
                                                Strategy strategy, Set<Object> bannedTieRefs) {
         List<TieCandidate> candidates = new ArrayList<>();
@@ -395,7 +823,7 @@ public class VariantPlanner {
             }
             int degree = chamberDegrees.getOrDefault(chamber.id, 0);
             PlanNode node = plan.findNode(chamber.utm.getCoordinate());
-            int added = node != null ? plan.tieInsToExisting.getOrDefault(node, 0) : 0;
+            int added = node != null ? plan.degree(node) : 0;
             if (degree + added + 1 > MAX_CHAMBER_CONNECTIONS) {
                 continue;
             }
@@ -411,6 +839,10 @@ public class VariantPlanner {
                 continue;
             }
             for (Coordinate sample : samplePipe(pipe)) {
+                if (plan.findNode(sample) != null
+                        || existingPipeDegree(sample) + 1 > MAX_CHAMBER_CONNECTIONS) {
+                    continue; // occupied positions have a correctly priced chamber candidate
+                }
                 if (nearAvailableChamber(sample, plan)) {
                     continue; // правило 10 м: используется существующая камера
                 }
@@ -436,7 +868,7 @@ public class VariantPlanner {
         if (strategy != Strategy.INDEPENDENT) {
             for (ru.lct.heatnet.network.PlanNode node : plan.nodes) {
                 if (node.kind == PlanNode.Kind.NEW_CHAMBER
-                        && plan.degree(node) < MAX_CHAMBER_CONNECTIONS
+                        && canAddBranch(plan, node)
                         && !insideBlocking(node.utm, ctx)) {
                     candidates.add(new TieCandidate(TieCandidate.Kind.NEW_NETWORK_NODE,
                             node.utm, node, 0, node.exemptSpecialIds));
@@ -446,7 +878,7 @@ public class VariantPlanner {
                 List<Coordinate> pts = sampleEdge(edge);
                 double terminal = CostModel.chamberCost(assumed.getDu());
                 for (Coordinate c : pts) {
-                    if (!insideBlocking(c, ctx)) {
+                    if (plan.findNode(c) == null && !insideBlocking(c, ctx) && canSplitEdge(edge, c, ctx)) {
                         candidates.add(new TieCandidate(TieCandidate.Kind.NEW_NETWORK_EDGE_POINT,
                                 c, edge, terminal, null));
                     }
@@ -457,38 +889,51 @@ public class VariantPlanner {
     }
 
     /**
-     * Отсечение дальних кандидатов присоединения: цель в разы дальше ближайшей
-     * не может выиграть по показателю S (разница терминальных стоимостей камер
-     * и врезок эквивалентна ~20 м трассы). Кратно сокращает коридор поиска.
+     * Эвристическое отсечение дальних целей относительно всех подходов.
+     * Ближайшая к каждой стене цель сохраняется даже при общем лимите;
+     * расстояние до одной ближайшей стены не описывает доступность других.
      */
-    private List<TieCandidate> pruneTargets(List<TieCandidate> targets, Coordinate from) {
+    private List<TieCandidate> pruneTargets(List<TieCandidate> targets, List<Coordinate> starts) {
         if (targets.size() <= 40) {
             return targets;
         }
-        double dmin = Double.POSITIVE_INFINITY;
+        Map<TieCandidate, Double> distance = new HashMap<>();
         for (TieCandidate t : targets) {
-            dmin = Math.min(dmin, t.location.distance(from));
+            distance.put(t, Double.POSITIVE_INFINITY);
         }
-        double cutoff = Math.max(2 * dmin, dmin + 150);
-        List<TieCandidate> near = new ArrayList<>();
-        for (TieCandidate t : targets) {
-            if (t.location.distance(from) <= cutoff) {
-                near.add(t);
+        Set<TieCandidate> selected = new java.util.LinkedHashSet<>();
+        Set<TieCandidate> eligible = new java.util.LinkedHashSet<>();
+        for (Coordinate from : starts) {
+            TieCandidate closest = targets.stream()
+                    .min(Comparator.comparingDouble(t -> t.location.distance(from))).orElseThrow();
+            selected.add(closest);
+            double dmin = closest.location.distance(from);
+            double cutoff = Math.max(2 * dmin, dmin + 150);
+            for (TieCandidate t : targets) {
+                double d = t.location.distance(from);
+                distance.put(t, Math.min(distance.get(t), d));
+                if (d <= cutoff) {
+                    eligible.add(t);
+                }
             }
         }
-        if (near.size() > 250) {
-            near.sort(Comparator.comparingDouble(t -> t.location.distance(from)));
-            near = new ArrayList<>(near.subList(0, 250));
+        List<TieCandidate> near = new ArrayList<>(eligible);
+        near.sort(Comparator.comparingDouble(distance::get));
+        for (TieCandidate t : near) {
+            if (selected.size() >= 250) {
+                break;
+            }
+            selected.add(t);
         }
-        return near;
+        return new ArrayList<>(selected);
     }
 
     private boolean nearAvailableChamber(Coordinate c, NetworkPlan plan) {
         for (InputModel.ExistingChamber chamber : input.chambers) {
-            if (chamber.utm.getCoordinate().distance(c) < CHAMBER_RULE_RADIUS) {
+            if (chamber.utm.getCoordinate().distance(c) <= CHAMBER_RULE_RADIUS) {
                 int degree = chamberDegrees.getOrDefault(chamber.id, 0);
                 PlanNode node = plan.findNode(chamber.utm.getCoordinate());
-                int added = node != null ? plan.tieInsToExisting.getOrDefault(node, 0) : 0;
+                int added = node != null ? plan.degree(node) : 0;
                 if (degree + added + 1 <= MAX_CHAMBER_CONNECTIONS) {
                     return true;
                 }
@@ -576,6 +1021,10 @@ public class VariantPlanner {
                     continue;
                 }
                 for (Coordinate c : inter.getCoordinates()) {
+                    if (plan.findNode(c) != null
+                            || existingPipeDegree(c) + 1 > MAX_CHAMBER_CONNECTIONS) {
+                        continue; // do not replace a valid tie with an occupied pipe sample
+                    }
                     double along = c.distance(coords.get(i));
                     if (along > bestAlong) {
                         bestAlong = along;
@@ -611,7 +1060,7 @@ public class VariantPlanner {
             }
             Coordinate rest = coords.get(i + 1);
             if (crossPt.distance(rest) > 0.05) {
-                EdgeValidator.EdgeCheck check = validator.check(crossPt, rest, exempt, null, crossPt);
+                EdgeValidator.EdgeCheck check = validator.check(crossPt, rest, exempt, null, crossPt, crossPt);
                 if (!check.valid) {
                     return tie;
                 }
@@ -630,7 +1079,7 @@ public class VariantPlanner {
     }
 
     /** Перенос врезки в основание перпендикуляра из последней вершины маршрута. */
-    private TieCandidate refinePipeTie(TieCandidate tie, List<Coordinate> coords,
+    private TieCandidate refinePipeTie(NetworkPlan plan, TieCandidate tie, List<Coordinate> coords,
                                        EdgeValidator validator) {
         InputModel.ExistingPipe pipe = pipesById.get(tie.refId);
         if (pipe == null) {
@@ -639,10 +1088,12 @@ public class VariantPlanner {
         Coordinate next = coords.get(1);
         Coordinate foot = org.locationtech.jts.operation.distance.DistanceOp
                 .nearestPoints(pipe.utm, GeoUtil.GF.createPoint(next))[0];
-        if (foot.distance(tie.location) < 0.5) {
+        if (foot.distance(tie.location) < 0.5 || plan.findNode(foot) != null
+                || existingPipeDegree(foot) + 1 > MAX_CHAMBER_CONNECTIONS
+                || nearAvailableChamber(foot, plan)) {
             return tie;
         }
-        EdgeValidator.EdgeCheck check = validator.check(next, foot, tie.exemptSpecialIds, null, foot);
+        EdgeValidator.EdgeCheck check = validator.check(next, foot, tie.exemptSpecialIds, null, foot, foot);
         if (!check.valid) {
             return tie;
         }
@@ -652,7 +1103,7 @@ public class VariantPlanner {
 
     /** Чистка микро-рёбер, почти коллинеарных вершин, исправление поворотов больше 90°. */
     private List<Coordinate> postprocess(List<Coordinate> coords, EdgeValidator validator,
-                                         Coordinate tieLocation) {
+                                         Coordinate tieLocation, Coordinate sourceConnectionAt) {
         List<Coordinate> result = new ArrayList<>(coords);
         // микро-рёбра: промежуточная вершина ближе 0.25 м к соседней удаляется,
         // если спрямлённое ребро допустимо
@@ -660,8 +1111,10 @@ public class VariantPlanner {
             if (result.get(i).distance(result.get(i - 1)) < 0.25
                     || result.get(i).distance(result.get(i + 1)) < 0.25) {
                 Coordinate allowTouch = i - 1 == 0 ? tieLocation : null;
+                Coordinate sourceEnd = i - 1 == 0 && sourceConnectionAt != null
+                        && result.get(i - 1).equals2D(sourceConnectionAt) ? sourceConnectionAt : null;
                 EdgeValidator.EdgeCheck bridged =
-                        validator.check(result.get(i - 1), result.get(i + 1), null, null, allowTouch);
+                        validator.check(result.get(i - 1), result.get(i + 1), null, null, allowTouch, sourceEnd);
                 if (bridged.valid) {
                     result.remove(i);
                     if (i > 1) {
@@ -697,6 +1150,7 @@ public class VariantPlanner {
                     }
                     Coordinate v1 = pointAt(v, prev, m);
                     Coordinate v2 = pointAt(v, next, m);
+                    // A bevel creates two new internal points: neither inherits the source permission.
                     EdgeValidator.EdgeCheck check = validator.check(v1, v2, null, null,
                             i - 1 == 0 ? tieLocation : null);
                     if (check.valid) {

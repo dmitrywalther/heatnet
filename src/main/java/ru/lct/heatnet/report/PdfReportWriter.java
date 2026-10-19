@@ -10,6 +10,8 @@ import org.apache.pdfbox.pdmodel.graphics.image.LosslessFactory;
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import ru.lct.heatnet.model.InputModel;
 import ru.lct.heatnet.network.VariantResult;
+import ru.lct.heatnet.network.VariantDiagnostic;
+import ru.lct.heatnet.service.ResultDiagnosticIO;
 import ru.lct.heatnet.refdata.CostModel;
 import ru.lct.heatnet.refdata.PipeTable;
 
@@ -46,6 +48,7 @@ public class PdfReportWriter {
     private final InputModel input;
     private final List<VariantResult> variants;
     private final List<VariantResult> depthVariants;
+    private final List<VariantDiagnostic> diagnostics;
 
     private PDDocument doc;
     private PDFont regular;
@@ -60,12 +63,20 @@ public class PdfReportWriter {
 
     public PdfReportWriter(InputModel input, List<VariantResult> variants,
                            List<VariantResult> depthVariants) {
+        this(input, variants, depthVariants, List.of());
+    }
+
+    public PdfReportWriter(InputModel input, List<VariantResult> variants,
+                           List<VariantResult> depthVariants, List<VariantDiagnostic> diagnostics) {
         this.input = input;
         this.variants = variants;
         this.depthVariants = depthVariants;
+        this.diagnostics = List.copyOf(diagnostics);
     }
 
     public void write(OutputStream out) throws IOException {
+        ResultDiagnosticIO.requireValidVariants(variants, false);
+        if (depthVariants != null) ResultDiagnosticIO.requireValidVariants(depthVariants, true);
         doc = new PDDocument();
         regular = loadFont("/fonts/DejaVuSans.ttf");
         bold = loadFont("/fonts/DejaVuSans-Bold.ttf");
@@ -129,6 +140,26 @@ public class PdfReportWriter {
                 new boolean[]{false, false, true, true, true, false}, rows);
         y -= 16;
 
+        if (!diagnostics.isEmpty()) {
+            heading("Исключённые варианты");
+            paragraph("Перечисленные ниже варианты не прошли проверку допустимости и не включены "
+                    + "в результаты. Это не доказывает отсутствия другого допустимого решения.", 10, MUTED);
+            for (VariantDiagnostic diagnostic : diagnostics) {
+                paragraph(diagnostic.variantId + " ("
+                        + ("depth".equals(diagnostic.mode) ? "режим с глубиной" : "базовый режим")
+                        + "): " + diagnostic.message + " [" + diagnostic.code + "]", 10, TEXT);
+                if (!diagnostic.segmentIds.isEmpty()) {
+                    int shown = Math.min(10, diagnostic.segmentIds.size());
+                    paragraph("Участки: " + String.join(", ", diagnostic.segmentIds.subList(0, shown))
+                            + (shown < diagnostic.segmentIds.size()
+                                ? "; ещё " + (diagnostic.segmentIds.size() - shown) : ""), 9, MUTED);
+                }
+            }
+            paragraph("Полные списки участков приведены в поле diagnostics GeoJSON и в JSON-файле "
+                    + "диагностики рядом с результатом.", 9, MUTED);
+            y -= 12;
+        }
+
         if (depthVariants != null && !depthVariants.isEmpty()) {
             heading("Дополнительный режим с учётом глубины");
             List<String[]> depthRows = new ArrayList<>();
@@ -148,6 +179,7 @@ public class PdfReportWriter {
             table(new String[]{"Место", "Вариант", "Стоимость, руб.", "Score", "Профиль"},
                     new float[]{45, 180, 110, 60, 135},
                     new boolean[]{false, false, true, true, false}, depthRows);
+            y -= 12;
             paragraph("Маршруты вертикально спланированы вдоль тех же трасс: пересечения "
                     + "существующих коммуникаций проходятся выше или ниже с нормативным "
                     + "просветом, глубина задана атрибутами depth_start / depth_end, "
@@ -163,9 +195,9 @@ public class PdfReportWriter {
                 + "плюс штрафы за неподключённые точки), руб.; L — суммарная длина новых "
                 + "участков, м. Чем меньше значение показателя, тем выше вариант в ранжировании.", 10, MUTED);
         y -= 10;
-        paragraph("Варианты различаются содержательно: точками присоединения к существующей "
-                + "сети и объединением ОКС в общие магистрали. Раздельный вариант приводится "
-                + "для сравнения и обоснования совместного подключения.", 10, MUTED);
+        paragraph("Основной вариант предусматривает совместное подключение ОКС с общими "
+                + "магистралями. Альтернативный вариант включается при наличии содержательно "
+                + "отличающегося решения с другими точками присоединения к существующей сети.", 10, MUTED);
     }
 
     private void variantPages(VariantResult v, MapRenderer renderer) throws IOException {

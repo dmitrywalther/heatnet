@@ -8,6 +8,7 @@ import ru.lct.heatnet.network.NetworkPlan;
 import ru.lct.heatnet.network.PlanEdge;
 import ru.lct.heatnet.network.PlanNode;
 import ru.lct.heatnet.network.VariantResult;
+import ru.lct.heatnet.network.VariantDiagnostic;
 import ru.lct.heatnet.routing.ObstacleIndex;
 
 import java.util.ArrayList;
@@ -17,12 +18,14 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * Формирование до трёх содержательно различающихся вариантов подключения
+ * Формирование совместного и содержательно отличающегося альтернативного варианта
  * и их ранжирование по итоговому показателю S.
  */
 public class TracingEngine {
 
     private static final Logger log = LoggerFactory.getLogger(TracingEngine.class);
+    /** Бюджет дорогих вторых перепрокладок на один запуск, не норматив. */
+    private static final int MAX_JOINT_RECONNECTS = 16;
 
     private final ru.lct.heatnet.refdata.RestrictionRules rules;
 
@@ -41,10 +44,11 @@ public class TracingEngine {
 
         List<VariantResult> variants = new ArrayList<>();
         List<BuiltVariant> kept = new ArrayList<>();
+        List<VariantDiagnostic> diagnostics = new ArrayList<>();
 
         // Совместный вариант строится несколькими порядками вставки ОКС —
         // жадная эвристика чувствительна к порядку; лучший берётся как v1.
-        // Все кандидаты и независимый вариант считаются параллельно (контексты
+        // Все совместные кандидаты считаются параллельно (контексты
         // препятствий и кэши потокобезопасны, PreparedGeometry в JTS
         // рассчитан на многопоточное использование).
         List<java.util.concurrent.CompletableFuture<BuiltVariant>> sharedCandidates =
@@ -54,11 +58,6 @@ public class TracingEngine {
                     () -> buildVariant(planner, assembler, VariantPlanner.Strategy.SHARED,
                             null, "v1", "shared", order)));
         }
-        java.util.concurrent.CompletableFuture<BuiltVariant> f2 =
-                java.util.concurrent.CompletableFuture.supplyAsync(() -> buildVariant(
-                        planner, assembler, VariantPlanner.Strategy.INDEPENDENT, null,
-                        "v2", "independent", VariantPlanner.InsertionOrder.FLOW_DESC));
-
         BuiltVariant b1 = null;
         for (int i = 0; i < sharedCandidates.size(); i++) {
             BuiltVariant candidate = sharedCandidates.get(i).join();
@@ -69,8 +68,6 @@ public class TracingEngine {
                 b1 = candidate;
             }
         }
-        BuiltVariant b2 = f2.join();
-
         // 1-opt улучшение лучшего совместного варианта: каждый ОКС по очереди
         // отключается и переприкладывается против финальной сети
         b1 = localImprove(input, planner, assembler, b1);
@@ -78,21 +75,19 @@ public class TracingEngine {
         VariantResult v1 = b1.result;
         variants.add(v1);
         kept.add(b1);
-        if (isMeaningfullyDifferent(v1, b2.result)) {
-            variants.add(b2.result);
-            kept.add(b2);
-        }
-
         // Вариант 3: альтернативные точки присоединения
         Set<Object> usedTies = tieRefs(b1.plan);
         if (!usedTies.isEmpty()) {
             BuiltVariant b3 = buildVariant(planner, assembler,
                     VariantPlanner.Strategy.ALTERNATIVE, usedTies, "v3", "alternative",
                     VariantPlanner.InsertionOrder.FLOW_DESC);
-            boolean sameConnected = b3.result.unconnectedOksIds.size() <= v1.unconnectedOksIds.size();
-            if (sameConnected && isMeaningfullyDifferentFromAll(variants, b3.result)) {
+            if (acceptsAlternative(b3.result, v1, variants)) {
                 variants.add(b3.result);
                 kept.add(b3);
+            } else if (!b3.result.isValid()) {
+                log.warn("Альтернативный вариант v3 исключён из выдачи: после повторного построения "
+                        + "остались нарушения геометрических ограничений");
+                recordRejection(b3.result, "base", diagnostics);
             }
         }
 
@@ -102,6 +97,20 @@ public class TracingEngine {
             }
         }
 
+        return finalizeVariants(kept, assembler, diagnostics);
+    }
+
+    TracingResult finalizeVariants(List<BuiltVariant> kept, NetworkAssembler assembler) {
+        return finalizeVariants(kept, assembler, new ArrayList<>());
+    }
+
+    private TracingResult finalizeVariants(List<BuiltVariant> kept, NetworkAssembler assembler,
+                                           List<VariantDiagnostic> diagnostics) {
+        List<VariantResult> variants = new ArrayList<>();
+        for (BuiltVariant b : kept) {
+            if (b.result.isValid()) variants.add(b.result);
+            else recordRejection(b.result, "base", diagnostics);
+        }
         variants.sort(Comparator.comparingDouble(v -> v.score));
         for (int i = 0; i < variants.size(); i++) {
             variants.get(i).rank = i + 1;
@@ -110,19 +119,39 @@ public class TracingEngine {
         // Дополнительный режим с учётом глубины: вертикальное планирование
         // вдоль тех же маршрутов, отдельный набор вариантов и ранжирование
         List<VariantResult> depthVariants = new ArrayList<>();
-        for (int i = 0; i < kept.size(); i++) {
-            BuiltVariant b = kept.get(i);
-            depthVariants.add(assembler.assemble(b.plan, "d" + (i + 1),
-                    b.result.strategyName, true));
+        for (BuiltVariant b : kept) {
+            if (!b.result.isValid()) continue;
+            // ID сохраняет соответствие базовой стратегии и не зависит от rank
+            // или отсутствия других вариантов в отфильтрованном списке.
+            VariantResult depth = assembler.assemble(b.plan, "d" + b.result.variantId.substring(1),
+                    b.result.strategyName, true);
+            if (depth.isValid()) depthVariants.add(depth);
+            else recordRejection(depth, "depth", diagnostics);
         }
         depthVariants.sort(Comparator.comparingDouble(v -> v.score));
         for (int i = 0; i < depthVariants.size(); i++) {
             depthVariants.get(i).rank = i + 1;
         }
-        return new TracingResult(variants, depthVariants);
+        return new TracingResult(variants, depthVariants, diagnostics);
     }
 
-    private static final class BuiltVariant {
+    private static void recordRejection(VariantResult result, String mode, List<VariantDiagnostic> diagnostics) {
+        if (!result.diagnostics.isEmpty()) {
+            diagnostics.addAll(result.diagnostics);
+        } else {
+            diagnostics.add(new VariantDiagnostic(result.variantId, mode, "GEOMETRY_CONFLICT",
+                    "Вариант исключён из-за нарушения геометрических ограничений."));
+        }
+        log.warn("Вариант {} ({}) исключён из выдачи: не выполнены проверки допустимости", result.variantId, mode);
+    }
+
+    boolean acceptsAlternative(VariantResult candidate, VariantResult shared, List<VariantResult> retained) {
+        return candidate.isValid()
+                && (!shared.isValid() || candidate.unconnectedOksIds.size() <= shared.unconnectedOksIds.size())
+                && isMeaningfullyDifferentFromAll(retained, candidate);
+    }
+
+    static final class BuiltVariant {
         final NetworkPlan plan;
         final VariantResult result;
 
@@ -141,30 +170,43 @@ public class TracingEngine {
      * 1-opt: последовательная перепрокладка каждого подключённого ОКС против
      * итоговой сети. Пробы выполняются на копии плана и принимаются только
      * при улучшении показателя; до двух проходов, пока есть прогресс.
+     * Выгодная проба с изломом после удаления стыка может быть дополнена
+     * перепрокладкой одной зависимой ветви. Принимается только готовая пара.
      */
     private BuiltVariant localImprove(InputModel input, VariantPlanner planner,
                                       NetworkAssembler assembler, BuiltVariant start) {
         BuiltVariant current = start;
+        JointBudget joint = new JointBudget();
         for (int pass = 0; pass < 2; pass++) {
             boolean improved = false;
             for (InputModel.OksPoint oks : input.oksPoints) {
                 if (current.result.unconnectedOksIds.contains(oks.id)) {
                     continue;
                 }
-                NetworkPlan trial = current.plan.copy();
-                if (!trial.removeBranch(oks.id)) {
+                NetworkPlan disconnected = current.plan.copy();
+                if (!disconnected.removeBranch(oks.id)) {
                     continue;
                 }
-                if (!planner.reconnect(trial, oks)) {
-                    continue;
-                }
-                VariantResult trialResult = assembler.assemble(trial,
-                        current.result.variantId, current.result.strategyName);
-                if (better(trialResult, current.result)) {
-                    log.info("1-opt: перепрокладка ОКС {} улучшила score {} -> {}",
-                            oks.id, current.result.score, trialResult.score);
-                    current = new BuiltVariant(trial, trialResult);
-                    improved = true;
+                for (VariantPlanner.ReconnectCandidate candidate : planner.reconnectCandidates(disconnected, oks)) {
+                    VariantResult trialResult = assembler.assemble(candidate.plan,
+                            current.result.variantId, current.result.strategyName);
+                    if (acceptsReconnectCandidate(trialResult, current.result, candidate.alternativeEntry)) {
+                        log.info("1-opt: ОКС {}, другая близкая стена={}: score {} -> {}, стоимость {} -> {}",
+                                oks.id, candidate.alternativeEntry, current.result.score, trialResult.score,
+                                current.result.calculatedCost, trialResult.calculatedCost);
+                        current = new BuiltVariant(candidate.plan, trialResult);
+                        improved = true;
+                    } else if (!current.result.clearanceViolated && trialResult.clearanceViolated
+                            && trialResult.score < current.result.score
+                            && trialResult.calculatedCost <= current.result.calculatedCost + 1e-6
+                            && joint.attempted < MAX_JOINT_RECONNECTS) {
+                        BuiltVariant paired = tryJointReconnect(input, planner, assembler, current,
+                                disconnected, candidate.plan, oks.id, joint);
+                        if (paired != null) {
+                            current = paired;
+                            improved = true;
+                        }
+                    }
                 }
             }
             if (!improved) {
@@ -174,11 +216,68 @@ public class TracingEngine {
         if (current != start) {
             log.info("1-opt итог: score {} -> {}", start.result.score, current.result.score);
         }
+        if (joint.attempted > 0) {
+            log.info("Совместные перестройки: вторых перепрокладок {}/{}, принято {}",
+                    joint.attempted, MAX_JOINT_RECONNECTS, joint.accepted);
+        }
         return current;
     }
 
-    /** Полнота подключения важнее чистоты отступов, чистота — важнее показателя. */
+    private BuiltVariant tryJointReconnect(InputModel input, VariantPlanner planner,
+                                            NetworkAssembler assembler, BuiltVariant current,
+                                            NetworkPlan disconnected, NetworkPlan firstTrial,
+                                            Object primaryId, JointBudget budget) {
+        BuiltVariant best = current;
+        for (InputModel.OksPoint partner : JointBranchRepair.partners(input, disconnected, firstTrial, primaryId)) {
+            if (budget.attempted >= MAX_JOINT_RECONNECTS) break;
+            if (current.result.unconnectedOksIds.contains(partner.id)) continue;
+            NetworkPlan paired = firstTrial.copy();
+            if (!paired.removeBranch(partner.id) || JointBranchRepair.hasInvalidTurns(paired)) continue;
+            budget.attempted++;
+            // Только обычная перепрокладка партнёра: ограничиваем число дорогих A*.
+            if (!planner.reconnect(paired, partner)
+                    || !JointBranchRepair.preservesConnections(input, current.result, paired)) continue;
+            VariantResult result = assembler.assemble(paired,
+                    current.result.variantId, current.result.strategyName);
+            // Для любой пары обязательны полная допустимость, меньший S и цена не выше.
+            if (acceptsReconnectCandidate(result, best.result, true)) {
+                log.info("Совместная перестройка ОКС {} + {}: score {} -> {}, стоимость {} -> {}",
+                        primaryId, partner.id, best.result.score, result.score,
+                        best.result.calculatedCost, result.calculatedCost);
+                best = new BuiltVariant(paired, result);
+                budget.accepted++;
+            }
+        }
+        return best == current ? null : best;
+    }
+
+    private static final class JointBudget {
+        int attempted;
+        int accepted;
+    }
+
+    boolean acceptsReconnectCandidate(VariantResult candidate, VariantResult current,
+                                      boolean alternativeEntry) {
+        // Переподключение не должно закреплять недопустимую геометрию,
+        // даже если оно подключает больше ОКС или снижает показатель стоимости.
+        if (!candidate.isValid()) {
+            return false;
+        }
+        // Дополнительный внутренний участок оправдываем полной экономикой,
+        // сохраняя прежний критерий для обычного переподключения.
+        if (alternativeEntry && (!current.unconnectedOksIds.containsAll(candidate.unconnectedOksIds)
+                || !(candidate.score < current.score)
+                || candidate.calculatedCost > current.calculatedCost + 1e-6)) {
+            return false;
+        }
+        return better(candidate, current);
+    }
+
+    /** Допустимость обязательна; среди допустимых вариантов важнее полнота, затем показатель. */
     private boolean better(VariantResult candidate, VariantResult current) {
+        if (candidate.isValid() != current.isValid()) {
+            return candidate.isValid();
+        }
         if (candidate.unconnectedOksIds.size() != current.unconnectedOksIds.size()) {
             return candidate.unconnectedOksIds.size() < current.unconnectedOksIds.size();
         }
@@ -211,13 +310,7 @@ public class TracingEngine {
                 maxGrade != null ? maxGrade.getDu() : null);
         NetworkPlan retryPlan = planner.plan(strategy, banned, maxGrade, order);
         VariantResult retry = assembler.assemble(retryPlan, variantId, name);
-        // выбираем лучший из двух: сначала полнота подключения, затем отсутствие
-        // нарушений, затем показатель
-        boolean retryBetter = retry.unconnectedOksIds.size() < result.unconnectedOksIds.size()
-                || (retry.unconnectedOksIds.size() == result.unconnectedOksIds.size()
-                    && (!retry.clearanceViolated && result.clearanceViolated
-                        || retry.clearanceViolated == result.clearanceViolated
-                           && retry.score < result.score));
+        boolean retryBetter = better(retry, result);
         return retryBetter ? new BuiltVariant(retryPlan, retry) : new BuiltVariant(plan, result);
     }
 
@@ -244,7 +337,7 @@ public class TracingEngine {
 
     private boolean isMeaningfullyDifferentFromAll(List<VariantResult> existing, VariantResult candidate) {
         for (VariantResult v : existing) {
-            if (!isMeaningfullyDifferent(v, candidate)) {
+            if (v.isValid() && !isMeaningfullyDifferent(v, candidate)) {
                 return false;
             }
         }

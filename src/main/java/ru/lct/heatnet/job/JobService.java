@@ -1,6 +1,7 @@
 package ru.lct.heatnet.job;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
@@ -9,12 +10,14 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import ru.lct.heatnet.geo.GeoJsonReader;
-import ru.lct.heatnet.geo.GeoJsonWriter;
 import ru.lct.heatnet.geo.InputValidationException;
 import ru.lct.heatnet.geo.Projection;
 import ru.lct.heatnet.model.InputModel;
 import ru.lct.heatnet.network.VariantResult;
 import ru.lct.heatnet.service.TracingEngine;
+import ru.lct.heatnet.service.TracingResult;
+import ru.lct.heatnet.service.ResultDiagnosticIO;
+import ru.lct.heatnet.service.ResultFilesWriter;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
@@ -27,6 +30,7 @@ import java.nio.file.Paths;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import javax.annotation.PostConstruct;
 
 /**
  * Управление задачами расчёта: входной файл сохраняется во временное дисковое
@@ -37,6 +41,8 @@ import java.util.UUID;
 public class JobService {
 
     private static final Logger log = LoggerFactory.getLogger(JobService.class);
+    public static final String QUEUE_REJECTED_MESSAGE =
+            "Очередь расчётов заполнена или сервис останавливается. Повторите отправку позже.";
 
     private final JobRepository repository;
     private final ObjectMapper mapper = new ObjectMapper();
@@ -51,6 +57,26 @@ public class JobService {
         Files.createDirectories(this.storageDir);
         this.rules = ru.lct.heatnet.refdata.RestrictionRules.load(
                 rulesFile == null || rulesFile.isBlank() ? null : Paths.get(rulesFile));
+    }
+
+    /** Очередь живёт в памяти одного экземпляра сервиса; после рестарта её нельзя восстановить. */
+    @PostConstruct
+    public void recoverInterruptedJobs() {
+        int count = repository.failInterruptedJobs(
+                List.of(JobEntity.Status.QUEUED, JobEntity.Status.RUNNING), JobEntity.Status.ERROR,
+                Instant.now(), "Расчёт прерван перезапуском сервиса. Отправьте исходные данные повторно.");
+        if (count > 0) {
+            log.warn("После перезапуска завершено с ошибкой незаконченных задач: {}", count);
+        }
+    }
+
+    /** Отказ планировщика должен оставлять конечный статус вместо вечного QUEUED. */
+    public void markSubmissionRejected(String jobId) {
+        JobEntity job = repository.findById(jobId).orElseThrow();
+        job.setStatus(JobEntity.Status.ERROR);
+        job.setErrorMessage(QUEUE_REJECTED_MESSAGE);
+        job.setFinishedAt(Instant.now());
+        repository.save(job);
     }
 
     /** Создаёт задачу, сохраняя входной поток на диск. */
@@ -84,11 +110,17 @@ public class JobService {
         }
         job.setStatus(JobEntity.Status.RUNNING);
         job.setStartedAt(Instant.now());
+        job.setErrorMessage(null);
+        job.setResultPath(null);
+        job.setDepthResultPath(null);
+        job.setReportPath(null);
+        job.setSummaryJson(null);
         repository.save(job);
         try {
             Path resultPath = storageDir.resolve(jobId + "-result.geojson");
             Path depthPath = storageDir.resolve(jobId + "-result-depth.geojson");
             Path reportPath = storageDir.resolve(jobId + "-report.pdf");
+            Files.deleteIfExists(ResultDiagnosticIO.sidecarPath(resultPath));
             // пер-задачное переопределение справочника (редактор правил в UI)
             ru.lct.heatnet.refdata.RestrictionRules effectiveRules = this.rules;
             Path jobRules = storageDir.resolve(jobId + "-rules.yml");
@@ -102,11 +134,16 @@ public class JobService {
             ru.lct.heatnet.service.TracingResult result =
                     process(Paths.get(job.getInputPath()), resultPath, depthPath, reportPath,
                             effectiveRules);
-            job.setResultPath(resultPath.toString());
-            job.setDepthResultPath(depthPath.toString());
-            job.setReportPath(reportPath.toString());
             job.setSummaryJson(summary(result.variants));
-            job.setStatus(JobEntity.Status.DONE);
+            if (result.variants.isEmpty()) {
+                job.setStatus(JobEntity.Status.ERROR);
+                job.setErrorMessage(ResultDiagnosticIO.NO_VALID_BASE_MESSAGE);
+            } else {
+                job.setResultPath(resultPath.toString());
+                job.setDepthResultPath(result.depthVariants.isEmpty() ? null : depthPath.toString());
+                job.setReportPath(reportPath.toString());
+                job.setStatus(JobEntity.Status.DONE);
+            }
         } catch (InputValidationException e) {
             job.setStatus(JobEntity.Status.ERROR);
             job.setErrorMessage("Ошибка входных данных: " + String.join("; ", e.getProblems()));
@@ -120,7 +157,7 @@ public class JobService {
         }
     }
 
-    /** Синхронная обработка файла (используется и CLI-режимом). */
+    /** Синхронная обработка файла; правила записи общие с CLI. */
     public ru.lct.heatnet.service.TracingResult process(Path inputPath, Path resultPath,
                                                         Path depthPath, Path reportPath,
                                                         ru.lct.heatnet.refdata.RestrictionRules effectiveRules)
@@ -133,23 +170,21 @@ public class JobService {
         log.info("Входной набор: источников={}, участков сети={}, камер={}, точек ОКС={}, ограничений={}",
                 model.sources.size(), model.pipes.size(), model.chambers.size(),
                 model.oksPoints.size(), model.restrictions.size());
-        ru.lct.heatnet.service.TracingResult result = new TracingEngine(
-                effectiveRules != null ? effectiveRules : rules).run(model);
-        try (OutputStream out = new BufferedOutputStream(Files.newOutputStream(resultPath))) {
-            new GeoJsonWriter(projection).write(result.variants, out);
-        }
-        if (depthPath != null) {
-            try (OutputStream out = new BufferedOutputStream(Files.newOutputStream(depthPath))) {
-                new GeoJsonWriter(projection).write(result.depthVariants, out);
-            }
-        }
-        if (reportPath != null) {
-            try (OutputStream out = new BufferedOutputStream(Files.newOutputStream(reportPath))) {
-                new ru.lct.heatnet.report.PdfReportWriter(model, result.variants,
-                        result.depthVariants).write(out);
-            }
-        }
+        TracingResult result = calculate(model, effectiveRules != null ? effectiveRules : rules);
+        ResultFilesWriter.write(model, projection, result, resultPath, depthPath, reportPath);
         return result;
+    }
+
+    protected TracingResult calculate(InputModel model,
+                                      ru.lct.heatnet.refdata.RestrictionRules effectiveRules) {
+        return new TracingEngine(effectiveRules).run(model);
+    }
+
+    public JsonNode diagnostics(JobEntity job) throws IOException {
+        if (job.getStatus() == JobEntity.Status.QUEUED || job.getStatus() == JobEntity.Status.RUNNING) {
+            return ResultDiagnosticIO.toJson(List.of());
+        }
+        return ResultDiagnosticIO.read(storageDir.resolve(job.getId() + "-result.geojson"));
     }
 
     private String summary(List<VariantResult> variants) throws IOException {

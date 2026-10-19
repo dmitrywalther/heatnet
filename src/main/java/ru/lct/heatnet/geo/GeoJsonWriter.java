@@ -4,9 +4,13 @@ import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.locationtech.jts.geom.Coordinate;
 import ru.lct.heatnet.network.VariantResult;
+import ru.lct.heatnet.network.VariantDiagnostic;
+import ru.lct.heatnet.service.ResultDiagnosticIO;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.List;
 
 /**
@@ -23,6 +27,12 @@ public class GeoJsonWriter {
     }
 
     public void write(List<VariantResult> variants, OutputStream out) throws IOException {
+        write(variants, List.of(), out);
+    }
+
+    public void write(List<VariantResult> variants, List<VariantDiagnostic> diagnostics,
+                      OutputStream out) throws IOException {
+        ResultDiagnosticIO.requireValidVariants(variants, false);
         try (JsonGenerator gen = mapper.getFactory().createGenerator(out)) {
             gen.useDefaultPrettyPrinter();
             gen.writeStartObject();
@@ -32,6 +42,9 @@ public class GeoJsonWriter {
                 writeVariant(gen, v);
             }
             gen.writeEndArray();
+            if (!diagnostics.isEmpty()) {
+                gen.writeObjectField("diagnostics", ResultDiagnosticIO.toJson(diagnostics));
+            }
             gen.writeEndObject();
         }
     }
@@ -117,7 +130,7 @@ public class GeoJsonWriter {
         gen.writeStartObject();
         gen.writeStringField("type", "Feature");
         gen.writeObjectFieldStart("properties");
-        gen.writeStringField("id", v.variantId + "_summary");
+        gen.writeStringField("id", v.summaryId != null ? v.summaryId : v.variantId + "_summary");
         gen.writeStringField("object_type", "variant_summary");
         gen.writeStringField("variant_id", v.variantId);
         gen.writeNumberField("rank", v.rank);
@@ -163,6 +176,10 @@ public class GeoJsonWriter {
             gen.writeNumber((Double) id);
         } else if (id instanceof Integer) {
             gen.writeNumber((Integer) id);
+        } else if (id instanceof BigInteger) {
+            gen.writeNumber((BigInteger) id);
+        } else if (id instanceof BigDecimal) {
+            gen.writeNumber((BigDecimal) id);
         } else if (id == null) {
             gen.writeNull();
         } else {
@@ -172,7 +189,8 @@ public class GeoJsonWriter {
 
     /** Целые стоимости выводятся без дробной части. */
     private void writeCost(JsonGenerator gen, String field, double value) throws IOException {
-        if (value == Math.floor(value) && !Double.isInfinite(value)) {
+        // (double) Long.MAX_VALUE уже равен 2^63: нужна строгая верхняя граница.
+        if (value == Math.floor(value) && value >= -0x1p63 && value < 0x1p63) {
             gen.writeNumberField(field, (long) value);
         } else {
             gen.writeNumberField(field, value);

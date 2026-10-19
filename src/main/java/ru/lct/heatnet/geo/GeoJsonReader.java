@@ -3,8 +3,11 @@ package ru.lct.heatnet.geo;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
+import com.fasterxml.jackson.core.util.JsonParserDelegate;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.Geometry;
 import org.locationtech.jts.geom.GeometryFactory;
@@ -13,11 +16,17 @@ import org.locationtech.jts.geom.LinearRing;
 import org.locationtech.jts.geom.Point;
 import org.locationtech.jts.geom.Polygon;
 import ru.lct.heatnet.model.InputModel;
+import ru.lct.heatnet.refdata.CostModel;
+import ru.lct.heatnet.refdata.PipeTable;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Потоковый разбор входного GeoJSON (FeatureCollection, WGS 84).
@@ -29,7 +38,9 @@ import java.util.List;
  */
 public class GeoJsonReader {
 
-    private final ObjectMapper mapper = new ObjectMapper();
+    private final ObjectMapper mapper = new ObjectMapper()
+            .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
+            .setNodeFactory(JsonNodeFactory.withExactBigDecimals(true));
     private final GeometryFactory geometryFactory = new GeometryFactory();
     private final Projection projection;
 
@@ -40,9 +51,16 @@ public class GeoJsonReader {
     public InputModel read(InputStream in) throws IOException {
         InputModel model = new InputModel();
         List<String> problems = new ArrayList<>();
+        Map<Object, Integer> ids = new HashMap<>();
 
         JsonFactory factory = mapper.getFactory();
-        try (JsonParser parser = factory.createParser(in)) {
+        // Jackson's tree deserializer probes isNaN before reading BigDecimal.
+        // The default probe converts 1e400 to double infinity and loses its
+        // original finite decimal value. Strict JSON already rejects NaN/Infinity
+        // tokens, so the decimal lexeme can be read directly without that probe.
+        try (JsonParser parser = new JsonParserDelegate(factory.createParser(in)) {
+            @Override public boolean isNaN() { return false; }
+        }) {
             if (parser.nextToken() != JsonToken.START_OBJECT) {
                 throw new InputValidationException(List.of("Ожидался JSON-объект FeatureCollection"));
             }
@@ -59,7 +77,7 @@ public class GeoJsonReader {
                     while (parser.nextToken() != JsonToken.END_ARRAY) {
                         JsonNode feature = mapper.readTree(parser);
                         try {
-                            readFeature(feature, index, model, problems);
+                            readFeature(feature, index, model, problems, ids);
                         } catch (RuntimeException e) {
                             problems.add("features[" + index + "]: " + e.getMessage());
                         }
@@ -74,13 +92,27 @@ public class GeoJsonReader {
             }
         }
 
+        // Если даже сумма возможных штрафов не представима, расчёт стоимости
+        // не сможет корректно обработать такой файл ни при каком маршруте.
+        double possiblePenalty = 0;
+        for (InputModel.OksPoint point : model.oksPoints) {
+            possiblePenalty += CostModel.unconnectedPenalty(point.flowTph);
+            if (!Double.isFinite(possiblePenalty)) {
+                problems.add("features[" + ids.get(idKey(point.id))
+                        + "]: flow_tph: сумма штрафов по нагрузкам ОКС превышает численный диапазон расчёта"
+                        + " (при добавлении id=" + point.id + ")");
+                break;
+            }
+        }
+
         if (!problems.isEmpty()) {
             throw new InputValidationException(problems);
         }
         return model;
     }
 
-    private void readFeature(JsonNode feature, int index, InputModel model, List<String> problems) {
+    private void readFeature(JsonNode feature, int index, InputModel model, List<String> problems,
+                             Map<Object, Integer> ids) {
         JsonNode props = feature.path("properties");
         String objectType = props.path("object_type").asText(null);
         if (objectType == null) {
@@ -92,6 +124,14 @@ public class GeoJsonReader {
             problems.add("features[" + index + "] (" + objectType + "): отсутствует обязательный атрибут id");
             return;
         }
+        Object key = idKey(id);
+        Integer first = ids.putIfAbsent(key, index);
+        if (first != null) {
+            problems.add("features[" + index + "] (" + objectType + "): повторный id=" + id
+                    + "; впервые указан в features[" + first + "]");
+            return;
+        }
+        model.inputIds.add(id);
         JsonNode geometryNode = feature.get("geometry");
 
         switch (objectType) {
@@ -116,9 +156,16 @@ public class GeoJsonReader {
                     throw new IllegalArgumentException("heat_network id=" + id
                             + ": отсутствует числовой атрибут diameter");
                 }
+                int maxDu = PipeTable.grades().get(PipeTable.grades().size() - 1).getDu();
+                BigDecimal diameter = d.decimalValue();
+                if (diameter.signum() <= 0 || diameter.compareTo(BigDecimal.valueOf(maxDu)) > 0
+                        || diameter.stripTrailingZeros().scale() > 0) {
+                    throw new IllegalArgumentException("heat_network id=" + id
+                            + ": diameter должен быть целым числом от 1 до " + maxDu);
+                }
                 InputModel.ExistingPipe pipe = new InputModel.ExistingPipe();
                 pipe.id = id;
-                pipe.diameter = d.asInt();
+                pipe.diameter = diameter.intValueExact();
                 pipe.utm = (LineString) projection.projectToUtm(wgs);
                 model.pipes.add(pipe);
                 break;
@@ -139,9 +186,18 @@ public class GeoJsonReader {
                     throw new IllegalArgumentException("oks_connection_point id=" + id
                             + ": отсутствует числовой атрибут flow_tph");
                 }
+                BigDecimal exactFlow = flow.decimalValue();
+                double flowTph = exactFlow.doubleValue();
+                if (exactFlow.signum() < 0 || !Double.isFinite(flowTph)
+                        || (exactFlow.signum() > 0 && flowTph == 0)
+                        || !Double.isFinite(CostModel.unconnectedPenalty(flowTph))) {
+                    throw new IllegalArgumentException("oks_connection_point id=" + id
+                            + ": flow_tph должен быть неотрицательным конечным числом"
+                            + " с представимыми нагрузкой и штрафом");
+                }
                 InputModel.OksPoint p = new InputModel.OksPoint();
                 p.id = id;
-                p.flowTph = flow.asDouble();
+                p.flowTph = flowTph;
                 p.wgs = wgs.getCoordinate().copy();
                 p.utm = (Point) projection.projectToUtm(wgs);
                 model.oksPoints.add(p);
@@ -188,12 +244,23 @@ public class GeoJsonReader {
             return null;
         }
         if (idNode.isIntegralNumber()) {
-            return idNode.asLong();
+            BigInteger value = idNode.bigIntegerValue();
+            return value.bitLength() < 64 ? value.longValue() : value;
         }
         if (idNode.isNumber()) {
-            return idNode.asDouble();
+            BigDecimal value = idNode.decimalValue().stripTrailingZeros();
+            if (value.scale() <= 0 && value.compareTo(BigDecimal.valueOf(Long.MIN_VALUE)) >= 0
+                    && value.compareTo(BigDecimal.valueOf(Long.MAX_VALUE)) <= 0) {
+                return value.longValueExact();
+            }
+            return value;
         }
-        return idNode.asText();
+        if (idNode.isTextual()) return idNode.textValue();
+        throw new IllegalArgumentException("id должен быть строкой или числом");
+    }
+
+    private static Object idKey(Object id) {
+        return id instanceof Number ? new BigDecimal(id.toString()).stripTrailingZeros() : id;
     }
 
     private Point requirePoint(JsonNode geometryNode, int index, String objectType) {

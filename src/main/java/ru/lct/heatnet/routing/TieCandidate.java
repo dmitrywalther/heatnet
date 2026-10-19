@@ -1,6 +1,7 @@
 package ru.lct.heatnet.routing;
 
 import org.locationtech.jts.geom.Coordinate;
+import ru.lct.heatnet.network.PlanNode;
 
 import java.util.Collections;
 import java.util.Set;
@@ -35,5 +36,12 @@ public class TieCandidate {
         this.refId = refId;
         this.terminalCostRub = terminalCostRub;
         this.exemptSpecialIds = exemptSpecialIds == null ? Collections.emptySet() : exemptSpecialIds;
+    }
+
+    /** Только подлинная точка присоединения к исходной сети, не произвольный узел. */
+    public Coordinate sourceConnectionAt() {
+        return kind == Kind.EXISTING_CHAMBER || kind == Kind.PIPE_POINT
+                || (kind == Kind.NEW_NETWORK_NODE && refId instanceof PlanNode
+                && ((PlanNode) refId).isSourceConnection()) ? location : null;
     }
 }

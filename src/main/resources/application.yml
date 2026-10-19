@@ -16,7 +16,8 @@ spring:
     multipart:
       # входной файл до 3 ГБ (требование ТЗ, п. 3.2)
       max-file-size: 3GB
-      max-request-size: 3GB
+      # запас на multipart-заголовки и отдельный YAML (до 1 МиБ)
+      max-request-size: 3100MB
       # большие файлы сразу пишутся во временное дисковое хранилище
       file-size-threshold: 1MB
 
@@ -30,6 +31,10 @@ springdoc:
     path: /swagger-ui.html
 
 heatnet:
+  tracing:
+    # Ограничение одновременных тяжёлых расчётов; очередь хранится в памяти.
+    workers: ${HEATNET_TRACING_WORKERS:1}
+    queue-capacity: ${HEATNET_TRACING_QUEUE_CAPACITY:100}
   storage-dir: ${HEATNET_STORAGE:./data}
   # необязательный YAML со справочником ограничений поверх таблицы 2
   # (пример: config/rules-example.yml)

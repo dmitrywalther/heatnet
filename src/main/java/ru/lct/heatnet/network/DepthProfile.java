@@ -33,20 +33,56 @@ public final class DepthProfile {
         public final double to;
         public final double minDepth;
         public final double maxDepth;
+        /** Другой разрешённый способ того же пересечения; не расширяет это окно. */
+        final Window alternative;
 
         public Window(double from, double to, double minDepth, double maxDepth) {
+            this(from, to, minDepth, maxDepth, null);
+        }
+
+        public Window(double from, double to, double minDepth, double maxDepth,
+                      double alternativeMin, double alternativeMax) {
+            this(from, to, minDepth, maxDepth, new Window(from, to, alternativeMin, alternativeMax));
+        }
+
+        private Window(double from, double to, double minDepth, double maxDepth, Window alternative) {
             this.from = from;
             this.to = to;
             this.minDepth = minDepth;
             this.maxDepth = maxDepth;
+            this.alternative = alternative;
         }
     }
 
     /** Точки (s, h) кусочно-линейного профиля, s по возрастанию. */
     private final List<double[]> points;
+    private final List<ValidationIssue> issues;
+
+    public static final class ValidationIssue {
+        public final String code;
+        public final String message;
+
+        private ValidationIssue(String code, String message) {
+            this.code = code;
+            this.message = message;
+        }
+    }
+
+    public List<ValidationIssue> validationIssues() {
+        return issues;
+    }
+
+    public boolean isValid() {
+        return validationIssues().isEmpty();
+    }
 
     private DepthProfile(List<double[]> points) {
+        this(points, List.of());
+    }
+
+    private DepthProfile(List<double[]> points, List<ValidationIssue> issues) {
         this.points = points;
+        this.issues = List.copyOf(issues);
     }
 
     /** Профиль постоянной обычной глубины. */
@@ -57,7 +93,29 @@ public final class DepthProfile {
         return new DepthProfile(pts);
     }
 
+    /** Проверка готового согласованного профиля по выбранным исходным окнам. */
+    static DepthProfile checked(List<double[]> points, List<Window> windows) {
+        DepthProfile profile = new DepthProfile(points);
+        List<ValidationIssue> issues = new ArrayList<>();
+        profile.validate(windows, issues);
+        return new DepthProfile(points, issues);
+    }
+
+    DepthProfile withIssue(String code, String message) {
+        List<ValidationIssue> combined = new ArrayList<>(issues);
+        addIssue(combined, code, message);
+        return new DepthProfile(points, combined);
+    }
+
     public static DepthProfile build(double length, List<Window> windows) {
+        List<ValidationIssue> issues = new ArrayList<>();
+        if (!Double.isFinite(length) || length < 0 || windows.stream().anyMatch(w ->
+                !Double.isFinite(w.from) || !Double.isFinite(w.to)
+                        || !Double.isFinite(w.minDepth) || !Double.isFinite(w.maxDepth)
+                        || w.from < 0 || w.to > length || w.from > w.to)) {
+            addIssue(issues, "DEPTH_INVALID_VALUES", "Некорректные числовые данные вертикального профиля.");
+            return new DepthProfile(flat(Double.isFinite(length) && length >= 0 ? length : 0).points, issues);
+        }
         if (windows.isEmpty()) {
             return flat(length);
         }
@@ -74,6 +132,7 @@ public final class DepthProfile {
                     log.warn("Конфликт вертикальных требований на [{}, {}] — участок "
                             + "требует ручной проработки", prev.from, w.to);
                     hi = lo;
+                    addIssue(issues, "DEPTH_WINDOW_CONFLICT", "Не удалось согласовать требования к глубине в построенном профиле.");
                 }
                 merged.add(new Window(prev.from, Math.max(prev.to, w.to), lo, hi));
             } else {
@@ -114,7 +173,57 @@ public final class DepthProfile {
         } else if (pts.get(pts.size() - 1)[0] < length) {
             pts.add(new double[]{length, NORMAL_DEPTH});
         }
-        return new DepthProfile(normalize(pts, length));
+        DepthProfile profile = new DepthProfile(normalize(pts, length));
+        profile.validate(windows, issues);
+        return new DepthProfile(profile.points, issues);
+    }
+
+    /** Проверяем построенные точки и исходные окна, не исправляя готовый профиль. */
+    private void validate(List<Window> windows, List<ValidationIssue> issues) {
+        for (int i = 0; i < points.size(); i++) {
+            double[] point = points.get(i);
+            if (!Double.isFinite(point[0]) || !Double.isFinite(point[1])) {
+                addIssue(issues, "DEPTH_INVALID_VALUES", "Профиль содержит нечисловую координату или глубину.");
+                continue;
+            }
+            if (point[1] < MIN_DEPTH - 1e-9) {
+                addIssue(issues, "DEPTH_MINIMUM_DEPTH", "Глубина профиля меньше минимального покрытия 0,7 м.");
+            }
+            if (i > 0) {
+                double[] previous = points.get(i - 1);
+                double distance = point[0] - previous[0];
+                if (Math.abs(point[1] - previous[1]) > MAX_SLOPE * distance + 1e-9) {
+                    addIssue(issues, "DEPTH_SLOPE_EXCEEDED", "Рампа вертикального профиля превышает допустимый уклон 0,10 м/м.");
+                }
+            }
+        }
+        for (Window window : windows) {
+            if (Math.max(MIN_DEPTH, window.minDepth) > window.maxDepth + 1e-9) {
+                addIssue(issues, "DEPTH_WINDOW_CONFLICT", "Окно пересечения не содержит допустимой глубины.");
+            }
+            // На линейных кусках экстремумы достигаются на концах; проверяем
+            // также изломы внутри каждого исходного, а не объединённого окна.
+            boolean outside = outside(depthAt(window.from), window) || outside(depthAt(window.to), window);
+            for (double[] point : points) {
+                if (point[0] > window.from && point[0] < window.to && outside(point[1], window)) {
+                    outside = true;
+                }
+            }
+            if (outside) {
+                addIssue(issues, "DEPTH_WINDOW_VIOLATION", "Построенный профиль не удовлетворяет исходному окну глубины пересечения.");
+            }
+        }
+    }
+
+    private static boolean outside(double depth, Window window) {
+        return !Double.isFinite(depth) || depth < window.minDepth - 1e-9 || depth > window.maxDepth + 1e-9;
+    }
+
+    private static void addIssue(List<ValidationIssue> issues, String code, String message) {
+        for (ValidationIssue issue : issues) {
+            if (issue.code.equals(code)) return;
+        }
+        issues.add(new ValidationIssue(code, message));
     }
 
     /** Глубина плато: 3,0 если допустима, иначе ближайшая граница окна. */

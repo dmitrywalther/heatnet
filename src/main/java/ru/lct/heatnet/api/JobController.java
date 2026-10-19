@@ -17,6 +17,7 @@ import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 import ru.lct.heatnet.job.JobEntity;
 import ru.lct.heatnet.job.JobService;
+import ru.lct.heatnet.service.ResultDiagnosticIO;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -24,6 +25,7 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.RejectedExecutionException;
 
 /**
  * REST API сервиса трассировки: загрузка входного GeoJSON, статус расчёта,
@@ -34,6 +36,8 @@ import java.util.Map;
 @RequestMapping("/api/v1/tracing")
 @Tag(name = "tracing", description = "Моделирование трасс подключения к тепловым сетям")
 public class JobController {
+
+    private static final long MAX_RULES_BYTES = 1024L * 1024L;
 
     private final JobService jobService;
 
@@ -53,6 +57,10 @@ public class JobController {
         if (file.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Файл пуст");
         }
+        if (rules != null && rules.getSize() > MAX_RULES_BYTES) {
+            return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).body(Map.of(
+                    "code", "RULES_TOO_LARGE", "message", "Размер YAML со справочником не должен превышать 1 МиБ."));
+        }
         String rulesYaml = rules == null || rules.isEmpty()
                 ? null
                 : new String(rules.getBytes(), java.nio.charset.StandardCharsets.UTF_8);
@@ -60,7 +68,14 @@ public class JobController {
         try (InputStream in = file.getInputStream()) {
             job = jobService.createJob(in, rulesYaml);
         }
-        jobService.processAsync(job.getId());
+        try {
+            jobService.processAsync(job.getId());
+        } catch (RejectedExecutionException e) {
+            jobService.markSubmissionRejected(job.getId());
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(Map.of(
+                    "job_id", job.getId(), "status", JobEntity.Status.ERROR,
+                    "code", "TRACING_QUEUE_FULL", "message", JobService.QUEUE_REJECTED_MESSAGE));
+        }
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("job_id", job.getId());
         body.put("status", job.getStatus());
@@ -69,7 +84,7 @@ public class JobController {
 
     @Operation(summary = "Статус задачи расчёта")
     @GetMapping("/jobs/{id}")
-    public Map<String, Object> status(@PathVariable String id) {
+    public Map<String, Object> status(@PathVariable String id) throws IOException {
         JobEntity job = require(id);
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("job_id", job.getId());
@@ -83,17 +98,19 @@ public class JobController {
         if (job.getSummaryJson() != null) {
             body.put("variants", RawJson.parse(job.getSummaryJson()));
         }
+        body.put("diagnostics", jobService.diagnostics(job));
+        body.put("result_available", available(job, job.getResultPath()));
+        body.put("depth_available", available(job, job.getDepthResultPath()));
+        body.put("report_available", available(job, job.getReportPath()));
         return body;
     }
 
     @Operation(summary = "Выгрузить результат (GeoJSON, WGS 84)")
     @GetMapping(value = "/jobs/{id}/result")
-    public ResponseEntity<FileSystemResource> result(@PathVariable String id) {
+    public ResponseEntity<?> result(@PathVariable String id) throws IOException {
         JobEntity job = require(id);
-        if (job.getStatus() != JobEntity.Status.DONE || job.getResultPath() == null
-                || !Files.exists(Paths.get(job.getResultPath()))) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    "Результат недоступен: статус задачи " + job.getStatus());
+        if (!available(job, job.getResultPath())) {
+            return unavailable(job, "RESULT_UNAVAILABLE", "Результат недоступен: статус задачи " + job.getStatus());
         }
         FileSystemResource resource = new FileSystemResource(job.getResultPath());
         return ResponseEntity.ok()
@@ -106,12 +123,13 @@ public class JobController {
     @Operation(summary = "Результат дополнительного режима с учётом глубины (GeoJSON)",
             description = "Отдельный набор вариантов с атрибутами depth_start/depth_end и Kгл.")
     @GetMapping(value = "/jobs/{id}/result-depth")
-    public ResponseEntity<FileSystemResource> resultDepth(@PathVariable String id) {
+    public ResponseEntity<?> resultDepth(@PathVariable String id) throws IOException {
         JobEntity job = require(id);
-        if (job.getStatus() != JobEntity.Status.DONE || job.getDepthResultPath() == null
-                || !Files.exists(Paths.get(job.getDepthResultPath()))) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    "Результат режима с глубиной недоступен: статус задачи " + job.getStatus());
+        if (!available(job, job.getDepthResultPath())) {
+            boolean rejected = job.getStatus() == JobEntity.Status.DONE && job.getDepthResultPath() == null;
+            return unavailable(job, "DEPTH_RESULT_UNAVAILABLE", rejected
+                    ? ResultDiagnosticIO.NO_DEPTH_MESSAGE
+                    : "Результат режима с глубиной недоступен: статус задачи " + job.getStatus());
         }
         FileSystemResource resource = new FileSystemResource(job.getDepthResultPath());
         return ResponseEntity.ok()
@@ -124,12 +142,10 @@ public class JobController {
     @Operation(summary = "Пояснительная записка к расчёту (PDF)",
             description = "Карты вариантов, разбивка стоимости, таблицы участков, методика.")
     @GetMapping(value = "/jobs/{id}/report")
-    public ResponseEntity<FileSystemResource> report(@PathVariable String id) {
+    public ResponseEntity<?> report(@PathVariable String id) throws IOException {
         JobEntity job = require(id);
-        if (job.getStatus() != JobEntity.Status.DONE || job.getReportPath() == null
-                || !Files.exists(Paths.get(job.getReportPath()))) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    "Отчёт недоступен: статус задачи " + job.getStatus());
+        if (!available(job, job.getReportPath())) {
+            return unavailable(job, "REPORT_UNAVAILABLE", "Отчёт недоступен: статус задачи " + job.getStatus());
         }
         FileSystemResource resource = new FileSystemResource(job.getReportPath());
         return ResponseEntity.ok()
@@ -137,6 +153,24 @@ public class JobController {
                         "attachment; filename=\"heatnet-report.pdf\"")
                 .contentType(MediaType.APPLICATION_PDF)
                 .body(resource);
+    }
+
+    private static boolean available(JobEntity job, String path) {
+        return job.getStatus() == JobEntity.Status.DONE && path != null
+                && Files.isRegularFile(Paths.get(path));
+    }
+
+    private ResponseEntity<Map<String, Object>> unavailable(JobEntity job, String code, String message)
+            throws IOException {
+        if (ResultDiagnosticIO.NO_VALID_BASE_MESSAGE.equals(job.getErrorMessage())) {
+            code = "NO_VALID_BASE_VARIANT";
+            message = job.getErrorMessage();
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("code", code);
+        body.put("message", message);
+        body.put("diagnostics", jobService.diagnostics(job));
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
     }
 
     private JobEntity require(String id) {

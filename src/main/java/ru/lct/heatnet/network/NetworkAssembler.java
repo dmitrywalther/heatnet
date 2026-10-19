@@ -49,11 +49,23 @@ public class NetworkAssembler {
         VariantResult result = new VariantResult();
         result.variantId = variantId;
         result.strategyName = strategyName;
+        result.clearanceViolated = !NetworkGeometryValidator.isValid(plan);
+        String mode = depthMode ? "depth" : "base";
+        if (result.clearanceViolated) {
+            result.diagnostics.add(new VariantDiagnostic(variantId, mode, "GEOMETRY_CONFLICT",
+                    "Нарушены повороты, взаимные пересечения или согласованность геометрии сети."));
+        }
 
         Map<PlanNode, PlanEdge> parentEdge = computeFlows(plan);
         assignGrades(plan, parentEdge);
+        validateGrades(plan, parentEdge, result, mode);
 
         // --- идентификаторы узлов ---
+        OutputIds outputIds = new OutputIds(obstacles.inputIds());
+        // Прямые внутренние вызовы assemble могут передавать узлы вне InputModel.
+        for (PlanNode n : plan.nodes) outputIds.reserve(n.inputId);
+        for (ru.lct.heatnet.model.InputModel.OksPoint oks : plan.unconnected) outputIds.reserve(oks.id);
+        result.summaryId = outputIds.allocate(variantId + "_summary");
         int chamberSeq = 1, nodeSeq = 1, segmentSeq = 1;
         Map<PlanNode, Object> nodeIds = new LinkedHashMap<>();
         for (PlanNode n : plan.nodes) {
@@ -63,20 +75,21 @@ public class NetworkAssembler {
                     nodeIds.put(n, n.inputId);
                     break;
                 case NEW_CHAMBER:
-                    n.outId = variantId + "_chamber_" + chamberSeq++;
+                    n.outId = outputIds.allocate(variantId + "_chamber_" + chamberSeq++);
                     nodeIds.put(n, n.outId);
                     break;
                 case TECHNICAL_NODE:
-                    n.outId = variantId + "_node_p" + nodeSeq++;
+                    n.outId = outputIds.allocate(variantId + "_node_p" + nodeSeq++);
                     nodeIds.put(n, n.outId);
                     break;
                 default:
             }
         }
 
-        // --- сегментация рёбер по спецучасткам, проверка отступов ---
-        double totalLength = 0;
-        double segmentsCost = 0;
+        // Окна собираются до профиля: рампа может проходить через новый узел
+        // на соседнее ребро. Геометрическая проверка каждого ребра выполняется один раз.
+        Map<PlanEdge, EdgeIntervals> edgeIntervals = new LinkedHashMap<>();
+        Map<PlanEdge, List<DepthProfile.Window>> depthWindows = new LinkedHashMap<>();
         for (PlanEdge edge : plan.edges) {
             GradeContext ctx = obstacles.forGrade(edge.grade);
             EdgeValidator validator = new EdgeValidator(ctx);
@@ -89,7 +102,9 @@ public class NetworkAssembler {
                 Coordinate a = coords.get(i), b = coords.get(i + 1);
                 Set<Object> exempt = exemptFor(edge, i, coords.size());
                 Object skip = skipRestrictionFor(edge, i, coords.size());
-                EdgeValidator.EdgeCheck check = validator.check(a, b, exempt, skip);
+                Coordinate sourceAt = i == 0 && edge.a.isSourceConnection() ? edge.a.utm
+                        : i == coords.size() - 2 && edge.b.isSourceConnection() ? edge.b.utm : null;
+                EdgeValidator.EdgeCheck check = validator.check(a, b, exempt, skip, null, sourceAt);
                 if (!check.valid) {
                     valid = false;
                     org.slf4j.LoggerFactory.getLogger(NetworkAssembler.class).warn(
@@ -110,13 +125,26 @@ public class NetworkAssembler {
             }
             double edgeLength = arc;
             List<GeoUtil.SpecialInterval> merged = GeoUtil.mergeIntervals(intervals, edgeLength);
-
-            // вертикальный профиль (дополнительный режим)
-            DepthProfile profile = null;
+            edgeIntervals.put(edge, new EdgeIntervals(edgeLength, merged, valid));
             if (depthMode) {
-                profile = DepthProfile.build(edgeLength,
-                        verticalWindows(rawIntervals, edge.grade.getHeightM(), edgeLength));
+                depthWindows.put(edge, verticalWindows(rawIntervals, edge.grade.getHeightM(), edgeLength));
             }
+        }
+        Map<PlanEdge, DepthProfile> profiles = depthMode
+                ? NetworkDepthProfiles.build(plan, depthWindows, obstacles.existingNetworkTopDepthM())
+                : Collections.emptyMap();
+
+        // --- сегментация рёбер по спецучасткам и согласованному профилю ---
+        double totalLength = 0;
+        double segmentsCost = 0;
+        for (PlanEdge edge : plan.edges) {
+            int firstSegmentIndex = result.segments.size();
+            List<Coordinate> coords = edge.coords;
+            EdgeIntervals data = edgeIntervals.get(edge);
+            double edgeLength = data.length;
+            List<GeoUtil.SpecialInterval> merged = data.merged;
+            boolean valid = data.valid;
+            DepthProfile profile = profiles.get(edge);
 
             // точки деления: границы спецучастков + изломы профиля глубины
             java.util.TreeSet<Double> cuts = new java.util.TreeSet<>();
@@ -148,8 +176,10 @@ public class NetworkAssembler {
                 }
                 double mid = (fromArc + toArc) / 2;
                 double k = 1.0;
+                boolean special = false;
                 for (GeoUtil.SpecialInterval si : merged) {
                     if (si.from <= mid && mid <= si.to) {
+                        special = true;
                         k = Math.max(k, si.kSpec);
                     }
                 }
@@ -157,11 +187,11 @@ public class NetworkAssembler {
                 List<Coordinate> fragCoords = substring(coords, fromArc, toArc);
 
                 VariantResult.Segment seg = new VariantResult.Segment();
-                seg.id = variantId + "_net_" + segmentSeq++;
+                seg.id = outputIds.allocate(variantId + "_net_" + segmentSeq++);
                 seg.flowTph = round2(edge.flowTph);
                 seg.diameter = edge.grade.getDu();
                 seg.lengthM = round2(fragLen);
-                seg.special = k > 1.0;
+                seg.special = special;
                 seg.kSpec = k;
                 if (profile != null) {
                     seg.depthStart = round2(profile.depthAt(fromArc));
@@ -177,19 +207,34 @@ public class NetworkAssembler {
                     seg.startNodeId = aId;
                     seg.startWgs = edge.a.wgs;
                 } else {
-                    seg.startNodeId = techNodeId(result, fragCoords.get(0), variantId);
+                    seg.startNodeId = techNodeId(result, fragCoords.get(0), variantId, outputIds);
                 }
                 if (fragIndex == fragCount - 1) {
                     seg.endNodeId = bId;
                     seg.endWgs = edge.b.wgs;
                 } else {
-                    seg.endNodeId = techNodeId(result, fragCoords.get(fragCoords.size() - 1), variantId);
+                    seg.endNodeId = techNodeId(result, fragCoords.get(fragCoords.size() - 1), variantId, outputIds);
                 }
                 fragIndex++;
 
                 totalLength += fragLen;
                 segmentsCost += seg.cost;
                 result.segments.add(seg);
+            }
+            if (!valid || (profile != null && !profile.isValid())) {
+                List<String> segmentIds = new ArrayList<>();
+                for (int i = firstSegmentIndex; i < result.segments.size(); i++) {
+                    segmentIds.add(result.segments.get(i).id);
+                }
+                if (!valid) {
+                    result.diagnostics.add(new VariantDiagnostic(variantId, mode, "EDGE_CLEARANCE_CONFLICT",
+                            "Участок нарушает ограничения препятствий после подбора диаметра.", segmentIds));
+                }
+                if (profile != null) {
+                    for (DepthProfile.ValidationIssue issue : profile.validationIssues()) {
+                        result.diagnostics.add(new VariantDiagnostic(variantId, mode, issue.code, issue.message, segmentIds));
+                    }
+                }
             }
         }
 
@@ -246,6 +291,18 @@ public class NetworkAssembler {
         return result;
     }
 
+    private static final class EdgeIntervals {
+        final double length;
+        final List<GeoUtil.SpecialInterval> merged;
+        final boolean valid;
+
+        EdgeIntervals(double length, List<GeoUtil.SpecialInterval> merged, boolean valid) {
+            this.length = length;
+            this.merged = merged;
+            this.valid = valid;
+        }
+    }
+
     /**
      * Окна допустимых глубин верха габарита новой сети по вертикальным
      * правилам пересекаемых препятствий (таблица 2, режим с глубиной).
@@ -268,8 +325,9 @@ public class NetworkAssembler {
                 double aboveHi = v.obstacleTopDepthM - v.clearanceM - ourHeightM;
                 double belowLo = v.obstacleTopDepthM + v.obstacleHeightM + v.clearanceM;
                 if (aboveHi >= DepthProfile.MIN_DEPTH) {
-                    lo = DepthProfile.MIN_DEPTH;   // проходим над препятствием — дешевле
-                    hi = aboveHi;
+                    windows.add(new DepthProfile.Window(Math.max(0, si.from), Math.min(edgeLength, si.to),
+                            DepthProfile.MIN_DEPTH, aboveHi, belowLo, 1e9));
+                    continue; // сверху предпочтительно; снизу допустимо, если рампа сверху не помещается
                 } else {
                     lo = belowLo;                  // над не помещаемся — ныряем под
                     hi = 1e9;
@@ -303,17 +361,37 @@ public class NetworkAssembler {
     }
 
     /** Технический узел на границе спецучастка; совпадающие координаты переиспользуются. */
-    private Object techNodeId(VariantResult result, Coordinate at, String variantId) {
+    private Object techNodeId(VariantResult result, Coordinate at, String variantId, OutputIds outputIds) {
         for (VariantResult.TechNode t : result.techNodes) {
             if (t.utm.distance(at) < 1e-3) {
                 return t.id;
             }
         }
         VariantResult.TechNode node = new VariantResult.TechNode();
-        node.id = variantId + "_node_" + (result.techNodes.size() + 1);
+        node.id = outputIds.allocate(variantId + "_node_" + (result.techNodes.size() + 1));
         node.utm = at;
         result.techNodes.add(node);
         return node.id;
+    }
+
+    /** Имена обычных результатов прежние; при совпадении меняется только новый ID. */
+    private static final class OutputIds {
+        private final Set<Object> used;
+
+        OutputIds(Set<Object> inputIds) {
+            used = new HashSet<>(inputIds);
+        }
+
+        void reserve(Object id) {
+            if (id != null) used.add(id);
+        }
+
+        String allocate(String preferred) {
+            String candidate = preferred;
+            int suffix = 2;
+            while (!used.add(candidate)) candidate = preferred + "_" + suffix++;
+            return candidate;
+        }
     }
 
     /** Подполилиния по дуговым координатам [from, to]. */
@@ -474,6 +552,40 @@ public class NetworkAssembler {
         }
     }
 
+    /** Максимальная строка таблицы не разрешает превышать её расход или длину. */
+    private void validateGrades(NetworkPlan plan, Map<PlanNode, PlanEdge> parentEdge,
+                                VariantResult result, String mode) {
+        for (PlanEdge edge : plan.edges) {
+            if (!Double.isFinite(edge.flowTph) || edge.flowTph < 0
+                    || edge.flowTph > edge.grade.getCapacityTph()) {
+                result.diagnostics.add(new VariantDiagnostic(result.variantId, mode,
+                        "PIPE_CAPACITY_EXCEEDED", "Расход " + edge.flowTph
+                        + " т/ч недопустим для ДУ " + edge.grade.getDu()
+                        + " (пропускная способность " + edge.grade.getCapacityTph() + " т/ч)."));
+            }
+        }
+        for (PlanNode leaf : plan.nodes) {
+            if (leaf.kind != PlanNode.Kind.OKS) continue;
+            List<PlanEdge> path = pathToRoot(leaf, parentEdge);
+            int i = 0;
+            while (i < path.size()) {
+                PipeGrade grade = path.get(i).grade;
+                int j = i;
+                double length = 0;
+                while (j < path.size() && path.get(j).grade == grade) {
+                    length += path.get(j++).length();
+                }
+                if (!Double.isFinite(length) || length > grade.getLimitLengthM() + 1e-6) {
+                    result.diagnostics.add(new VariantDiagnostic(result.variantId, mode,
+                            "PIPE_LENGTH_LIMIT_EXCEEDED", "На пути ОКС " + leaf.inputId
+                            + " непрерывный участок ДУ " + grade.getDu() + " длиной " + length
+                            + " м превышает предел " + grade.getLimitLengthM() + " м."));
+                }
+                i = j;
+            }
+        }
+    }
+
     /** Рёбра пути от листа к корню (в порядке от листа). */
     private List<PlanEdge> pathToRoot(PlanNode leaf, Map<PlanNode, PlanEdge> parentEdge) {
         List<PlanEdge> path = new ArrayList<>();
@@ -488,10 +600,20 @@ public class NetworkAssembler {
     }
 
     static double round2(double v) {
-        return Math.round(v * 100) / 100.0;
+        return round(v, 100.0);
     }
 
     static double round4(double v) {
-        return Math.round(v * 10000) / 10000.0;
+        return round(v, 10000.0);
+    }
+
+    private static double round(double value, double factor) {
+        double scaled = value * factor;
+        // Здесь шаг double уже больше требуемой точности округления;
+        // Math.round вместо него молча подставил бы границу диапазона long.
+        if (!Double.isFinite(scaled) || scaled >= 0x1p63 || scaled <= -0x1p63) {
+            return value;
+        }
+        return Math.round(scaled) / factor;
     }
 }

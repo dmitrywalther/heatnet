@@ -45,6 +45,14 @@ class EdgeValidatorBarrierTest {
     }
 
     @Test
+    void numericalGapAtDeclaredConnectionIsNotALinearOverlap() {
+        EdgeValidator v = validatorWithBarrier();
+        Coordinate connect = new Coordinate(50, 0);
+        assertTrue(v.check(new Coordinate(50, 5), new Coordinate(50, 1e-10),
+                null, null, connect).valid);
+    }
+
+    @Test
     void touchingBarrierWithoutDeclaredConnectionIsInvalid() {
         EdgeValidator v = validatorWithBarrier();
         // без объявленной точки присоединения касание барьера запрещено —

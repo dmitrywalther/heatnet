@@ -16,11 +16,17 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import ru.lct.heatnet.job.JobService;
+import ru.lct.heatnet.job.JobEntity;
+import ru.lct.heatnet.job.JobRepository;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -59,6 +65,9 @@ class JobApiPostgresIntegrationTest {
 
     @Autowired
     private JobService jobService;
+
+    @Autowired
+    private JobRepository repository;
 
     private final ObjectMapper mapper = new ObjectMapper();
 
@@ -110,5 +119,33 @@ class JobApiPostgresIntegrationTest {
     private boolean isFinished(String jobId) {
         String status = jobService.get(jobId).getStatus().name();
         return "DONE".equals(status) || "ERROR".equals(status);
+    }
+
+    @Test
+    void recoveryPersistsReadableErrorLobOnRealPostgres() {
+        for (JobEntity.Status status : new JobEntity.Status[]{JobEntity.Status.QUEUED, JobEntity.Status.RUNNING}) {
+            JobEntity job = new JobEntity();
+            job.setId(UUID.randomUUID().toString());
+            job.setStatus(status);
+            job.setCreatedAt(Instant.now());
+            job.setInputPath("recovery-input.geojson");
+            job.setResultPath("incomplete-result.geojson");
+            job.setDepthResultPath("incomplete-depth.geojson");
+            job.setReportPath("incomplete-report.pdf");
+            job.setSummaryJson("[]");
+            repository.save(job);
+
+            jobService.recoverInterruptedJobs();
+
+            JobEntity recovered = repository.findById(job.getId()).orElseThrow();
+            assertEquals(JobEntity.Status.ERROR, recovered.getStatus());
+            assertTrue(recovered.getErrorMessage().contains("перезапуск"));
+            assertNotNull(recovered.getFinishedAt());
+            assertNull(recovered.getResultPath());
+            assertNull(recovered.getDepthResultPath());
+            assertNull(recovered.getReportPath());
+            assertNull(recovered.getSummaryJson());
+        }
+        assertTrue(POSTGRES.isRunning());
     }
 }

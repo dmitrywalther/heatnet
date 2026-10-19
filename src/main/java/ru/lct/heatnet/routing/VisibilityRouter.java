@@ -5,9 +5,7 @@ import org.locationtech.jts.geom.Envelope;
 import ru.lct.heatnet.refdata.CostModel;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Set;
 
@@ -56,6 +54,15 @@ public class VisibilityRouter {
         this.weightPerCostRub = CostModel.SCORE_COST_WEIGHT / CostModel.SCORE_COST_NORM;
         this.weightPerMeter = weightPerCostRub * unitCostPerMeter
                 + CostModel.SCORE_LENGTH_WEIGHT / CostModel.SCORE_LENGTH_NORM;
+    }
+
+    /** A strictly straight connection, already checked as a complete tie-to-target segment. */
+    public RoutedPath directPath(Coordinate target, TieCandidate tie, EdgeValidator.EdgeCheck check) {
+        if (!check.valid || Math.abs(check.length - tie.location.distance(target)) > 1e-6) {
+            throw new IllegalArgumentException("Direct path requires its valid complete segment check");
+        }
+        return new RoutedPath(List.of(tie.location, target), tie,
+                checkedWeight(check) + tie.terminalCostRub * weightPerCostRub);
     }
 
     /**
@@ -164,7 +171,6 @@ public class VisibilityRouter {
         double bestTotal = Double.POSITIVE_INFINITY;
         int bestTargetNode = -1;
         TieCandidate bestTie = null;
-        Map<Long, EdgeValidator.EdgeCheck> edgeCache = new HashMap<>();
         int expansions = 0;
 
         while (!open.isEmpty()) {
@@ -213,7 +219,7 @@ public class VisibilityRouter {
                     continue;
                 }
                 double w = edgeWeight(u, v, cu, cv, startCount, startExemptIds,
-                        reachableTargets, firstTarget, edgeCache);
+                        reachableTargets, firstTarget);
                 if (Double.isNaN(w)) {
                     continue;
                 }
@@ -244,35 +250,41 @@ public class VisibilityRouter {
     private double edgeWeight(int u, int v, Coordinate cu, Coordinate cv,
                               int startCount, Set<Object> startExemptIds,
                               List<TieCandidate> targets,
-                              int firstTarget, Map<Long, EdgeValidator.EdgeCheck> cache) {
-        long key = u < v ? ((long) u << 32) | v : ((long) v << 32) | u;
-        EdgeValidator.EdgeCheck check = cache.get(key);
-        if (check == null) {
-            Set<Object> exempt = null;
-            if (u < startCount || v < startCount) {
-                exempt = startExemptIds;
-            }
-            Coordinate allowTouchAt = null;
-            int targetIdx = Math.max(u, v) - firstTarget;
-            if (Math.max(u, v) >= firstTarget) {
-                TieCandidate tie = targets.get(targetIdx);
-                Set<Object> tieExempt = tie.exemptSpecialIds;
-                if (exempt == null || exempt.isEmpty()) {
-                    exempt = tieExempt;
-                } else {
-                    Set<Object> merged = new java.util.HashSet<>(exempt);
-                    merged.addAll(tieExempt);
-                    exempt = merged;
-                }
-                // касание построенной сети допустимо только в точке присоединения
-                allowTouchAt = tie.location;
-            }
-            check = validator.check(cu, cv, exempt, null, allowTouchAt);
-            cache.put(key, check);
+                              int firstTarget) {
+        // u раскрывается один раз, а closed[v] исключает обратную проверку пары.
+        // Локальный кеш не переиспользовал результаты; общий статический кеш
+        // препятствий остаётся внутри validator и полезен между поисками.
+        Set<Object> exempt = null;
+        if (u < startCount || v < startCount) {
+            exempt = startExemptIds;
         }
+        Coordinate allowTouchAt = null;
+        Coordinate sourceConnectionAt = null;
+        int targetIdx = Math.max(u, v) - firstTarget;
+        if (Math.max(u, v) >= firstTarget) {
+            TieCandidate tie = targets.get(targetIdx);
+            Set<Object> tieExempt = tie.exemptSpecialIds;
+            if (exempt == null || exempt.isEmpty()) {
+                exempt = tieExempt;
+            } else {
+                Set<Object> merged = new java.util.HashSet<>(exempt);
+                merged.addAll(tieExempt);
+                exempt = merged;
+            }
+            // касание построенной сети допустимо только в точке присоединения
+            allowTouchAt = tie.location;
+            sourceConnectionAt = tie.sourceConnectionAt();
+        }
+        EdgeValidator.EdgeCheck check = sourceConnectionAt == null
+                ? validator.check(cu, cv, exempt, null, allowTouchAt)
+                : validator.check(cu, cv, exempt, null, allowTouchAt, sourceConnectionAt);
         if (!check.valid) {
             return Double.NaN;
         }
+        return checkedWeight(check);
+    }
+
+    private double checkedWeight(EdgeValidator.EdgeCheck check) {
         double specialExtra = 0;
         for (GeoUtil.SpecialInterval si : check.specials) {
             specialExtra += (si.kSpec - 1) * (si.to - si.from);

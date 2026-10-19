@@ -6,6 +6,7 @@ import org.locationtech.jts.geom.Geometry;
 import org.locationtech.jts.geom.LineString;
 import org.locationtech.jts.geom.Point;
 import org.locationtech.jts.index.strtree.STRtree;
+import org.locationtech.jts.linearref.LengthIndexedLine;
 import ru.lct.heatnet.routing.GeoUtil.SpecialInterval;
 
 import java.util.ArrayList;
@@ -48,7 +49,7 @@ public class EdgeValidator {
      * пары плюс зазор. Дублирование трасс вплотную не имеет инженерного смысла
      * и после округления координат выглядит как наложение.
      */
-    private static final double BARRIER_SEPARATION_M = 1.5;
+    public static final double BARRIER_SEPARATION_M = 1.5;
     /** Радиус, в котором допускается заход в зону барьера для присоединения. */
     private static final double CONNECT_RADIUS_M = 6.0;
 
@@ -115,19 +116,31 @@ public class EdgeValidator {
     /**
      * @param exemptSpecialIds      объекты (трубы существующей сети), к которым ребро
      *                              примыкает — их зоны близости не проверяются
-     * @param skipRestrictionId     id ограничения собственного полигона ОКС: все его
-     *                              компоненты игнорируются на финальном подходе
+     * @param skipRestrictionId     id собственного ОКС: снимается отступ на
+     *                              финальном подходе, но разрешён только один
+     *                              вход через внешнюю стену без транзита
      * @param allowBarrierTouchAt   точка присоединения к построенной сети: только
      *                              в ней ребру разрешено коснуться барьера
      */
     public EdgeCheck check(Coordinate a, Coordinate b,
                            Set<Object> exemptSpecialIds, Object skipRestrictionId,
                            Coordinate allowBarrierTouchAt) {
+        return check(a, b, exemptSpecialIds, skipRestrictionId, allowBarrierTouchAt, null);
+    }
+
+    /**
+     * sourceConnectionAt — подтверждённая вызывающим кодом камера на исходной
+     * теплосети. П. 13 разрешает начать прямой спецпроход внутри дороги/трамвая;
+     * это не исключение объекта из проверок угла, отступа, цены или глубины.
+     */
+    public EdgeCheck check(Coordinate a, Coordinate b,
+                           Set<Object> exemptSpecialIds, Object skipRestrictionId,
+                           Coordinate allowBarrierTouchAt, Coordinate sourceConnectionAt) {
         double length = a.distance(b);
         if (length < COORD_EPS) {
             return EdgeCheck.invalid();
         }
-        EdgeCheck staticPart = staticCheck(a, b, length, exemptSpecialIds, skipRestrictionId);
+        EdgeCheck staticPart = staticCheck(a, b, length, exemptSpecialIds, skipRestrictionId, sourceConnectionAt);
         if (!staticPart.valid) {
             return EdgeCheck.invalid();
         }
@@ -143,9 +156,10 @@ public class EdgeValidator {
      * и вариантов с одним расчётным габаритом).
      */
     private EdgeCheck staticCheck(Coordinate a, Coordinate b, double length,
-                                  Set<Object> exemptSpecialIds, Object skipRestrictionId) {
+                                  Set<Object> exemptSpecialIds, Object skipRestrictionId,
+                                  Coordinate sourceConnectionAt) {
         boolean cacheable = (exemptSpecialIds == null || exemptSpecialIds.isEmpty())
-                && skipRestrictionId == null;
+                && skipRestrictionId == null && sourceConnectionAt == null;
         GradeContext.EdgeKey key = null;
         if (cacheable) {
             key = new GradeContext.EdgeKey(a, b);
@@ -155,7 +169,7 @@ public class EdgeValidator {
             }
         }
 
-        EdgeCheck result = computeStatic(a, b, length, exemptSpecialIds, skipRestrictionId);
+        EdgeCheck result = computeStatic(a, b, length, exemptSpecialIds, skipRestrictionId, sourceConnectionAt);
         if (cacheable) {
             // в кэше — результат в каноническом направлении ключа
             ctx.staticEdgeCache.put(key,
@@ -192,11 +206,17 @@ public class EdgeValidator {
     }
 
     private EdgeCheck computeStatic(Coordinate a, Coordinate b, double length,
-                                    Set<Object> exemptSpecialIds, Object skipRestrictionId) {
+                                    Set<Object> exemptSpecialIds, Object skipRestrictionId,
+                                    Coordinate sourceConnectionAt) {
         LineString seg = GeoUtil.segment(a, b);
         Envelope env = seg.getEnvelopeInternal();
 
-        for (ForbiddenZone zone : ctx.forbiddenIn(env)) {
+        List<ForbiddenZone> nearbyForbidden = ctx.forbiddenIn(env);
+        if (skipRestrictionId != null
+                && !OksEntryGeometry.allows(seg, nearbyForbidden, skipRestrictionId)) {
+            return EdgeCheck.invalid();
+        }
+        for (ForbiddenZone zone : nearbyForbidden) {
             if (skipRestrictionId != null && skipRestrictionId.equals(zone.restrictionId)) {
                 continue;
             }
@@ -213,7 +233,7 @@ public class EdgeValidator {
             if (!s.proximity.intersects(seg)) {
                 continue;
             }
-            if (!checkSpecial(seg, a, b, length, s, intervals)) {
+            if (!checkSpecial(seg, a, b, length, s, intervals, sourceConnectionAt)) {
                 return EdgeCheck.invalid();
             }
         }
@@ -229,59 +249,173 @@ public class EdgeValidator {
     private boolean barriersOk(Coordinate a, Coordinate b, Coordinate allowBarrierTouchAt) {
         LineString seg = GeoUtil.segment(a, b);
         Envelope env = seg.getEnvelopeInternal();
+        List<Coordinate> connections = allowBarrierTouchAt == null
+                ? Collections.emptyList() : Collections.singletonList(allowBarrierTouchAt);
         for (Barrier barrier : barriersIn(env)) {
-            if (!barrier.zonePrep.intersects(seg)) {
+            if (!barrierAllows(seg, a, b, connections, barrier)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Финальная симметричная проверка двух полных рёбер. Общие узлы передаёт
+     * план. Близость разрешена только непрерывным подходом от общего конца
+     * внутри радиуса присоединения; число вершин и фасок не меняет результат.
+     */
+    public static boolean networkLinesCompatible(LineString first, LineString second,
+                                                  List<Coordinate> sharedNodes) {
+        Geometry intersection = first.intersection(second);
+        if (!intersection.isEmpty() && intersection.getDimension() >= 1) {
+            return false;
+        }
+        for (Coordinate point : intersection.getCoordinates()) {
+            boolean shared = false;
+            for (Coordinate node : sharedNodes) {
+                if (point.distance(node) <= COORD_EPS) {
+                    shared = true;
+                    break;
+                }
+            }
+            if (!shared) {
+                return false;
+            }
+        }
+        return wholeLineAgainstBarrier(first, new Barrier(second), sharedNodes)
+                && wholeLineAgainstBarrier(second, new Barrier(first), sharedNodes);
+    }
+
+    private static boolean wholeLineAgainstBarrier(LineString line, Barrier barrier,
+                                                     List<Coordinate> sharedNodes) {
+        if (!barrier.zonePrep.intersects(line)) {
+            return true;
+        }
+        LengthIndexedLine indexed = new LengthIndexedLine(line);
+        List<double[]> intervals = new ArrayList<>();
+        collectArcIntervals(line.intersection(barrier.zone), indexed, intervals);
+        intervals.sort(java.util.Comparator.comparingDouble(interval -> interval[0]));
+        List<double[]> merged = new ArrayList<>();
+        for (double[] interval : intervals) {
+            if (!merged.isEmpty() && interval[0] <= merged.get(merged.size() - 1)[1] + COORD_EPS) {
+                double[] previous = merged.get(merged.size() - 1);
+                previous[1] = Math.max(previous[1], interval[1]);
+            } else {
+                merged.add(interval.clone());
+            }
+        }
+        Coordinate start = line.getCoordinateN(0);
+        Coordinate end = line.getCoordinateN(line.getNumPoints() - 1);
+        double length = line.getLength();
+        for (double[] interval : merged) {
+            boolean allowed = false;
+            for (Coordinate node : sharedNodes) {
+                boolean atStart = interval[0] <= COORD_EPS && start.equals2D(node);
+                boolean atEnd = interval[1] >= length - COORD_EPS && end.equals2D(node);
+                if ((atStart || atEnd)
+                        && portionNearConnection(indexed.extractLine(interval[0], interval[1]), node, barrier)) {
+                    allowed = true;
+                    break;
+                }
+            }
+            if (!allowed) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static void collectArcIntervals(Geometry geometry, LengthIndexedLine indexed,
+                                            List<double[]> intervals) {
+        if (geometry.isEmpty() || geometry.getDimension() < 1) {
+            return;
+        }
+        if (geometry instanceof LineString) {
+            Coordinate[] coords = geometry.getCoordinates();
+            double from = indexed.indexOf(coords[0]);
+            double to = indexed.indexOf(coords[coords.length - 1]);
+            intervals.add(new double[]{Math.min(from, to), Math.max(from, to)});
+        } else {
+            for (int i = 0; i < geometry.getNumGeometries(); i++) {
+                collectArcIntervals(geometry.getGeometryN(i), indexed, intervals);
+            }
+        }
+    }
+
+    private static boolean nearConnection(Coordinate point, List<Coordinate> connections) {
+        for (Coordinate connection : connections) {
+            if (point.distance(connection) <= 1e-3) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean barrierAllows(LineString seg, Coordinate a, Coordinate b,
+                                          List<Coordinate> connections, Barrier barrier) {
+        if (!barrier.zonePrep.intersects(seg)) {
+            return true;
+        }
+        Geometry x = seg.intersection(barrier.line);
+        // LINESTRING EMPTY имеет размерность 1, но не является наложением.
+        if (!x.isEmpty() && x.getDimension() >= 1) {
+            return false;
+        }
+        for (Coordinate c : x.getCoordinates()) {
+            if (!nearConnection(c, connections)) {
+                return false;
+            }
+        }
+        // Вершина около чужой оси не должна разрешать скольжение по ней.
+        for (Coordinate end : new Coordinate[]{a, b}) {
+            if (!nearConnection(end, connections)
+                    && barrier.line.distance(GeoUtil.GF.createPoint(end)) < 0.02) {
+                return false;
+            }
+        }
+        for (Coordinate v : barrier.line.getCoordinates()) {
+            if (v.distance(a) <= 1e-3 || v.distance(b) <= 1e-3 || nearConnection(v, connections)) {
                 continue;
             }
-            Geometry x = seg.intersection(barrier.line);
-            if (x.getDimension() >= 1) {
-                return false; // прокладка вдоль уже построенной оси
+            if (seg.distance(GeoUtil.GF.createPoint(v)) < 0.02) {
+                return false;
             }
-            for (Coordinate c : x.getCoordinates()) {
-                if (allowBarrierTouchAt == null || c.distance(allowBarrierTouchAt) > 1e-3) {
-                    return false; // контакт вне точки присоединения
-                }
+        }
+        Geometry portions = seg.intersection(barrier.zone);
+        for (int i = 0; i < portions.getNumGeometries(); i++) {
+            Geometry portion = portions.getGeometryN(i);
+            if (portion.getDimension() < 1 || portion.isEmpty()) {
+                continue;
             }
-            // концы ребра не должны лежать на оси барьера (кроме точки
-            // присоединения): вершина графа в микронах от оси позволяет
-            // «скользить» вдоль построенного участка сквозь робастность нодинга
-            for (Coordinate end : new Coordinate[]{a, b}) {
-                if (allowBarrierTouchAt != null && end.distance(allowBarrierTouchAt) <= 1e-3) {
-                    continue;
-                }
-                if (barrier.line.distance(GeoUtil.GF.createPoint(end)) < 0.02) {
-                    return false;
+            boolean near = false;
+            for (Coordinate connection : connections) {
+                if (portionNearConnection(portion, connection, barrier)) {
+                    near = true;
+                    break;
                 }
             }
-            // симметрично: вершина барьера на оси нового ребра — то же
-            // скольжение, когда барьер строился позже соседa
-            for (Coordinate v : barrier.line.getCoordinates()) {
-                if (v.distance(a) <= 1e-3 || v.distance(b) <= 1e-3) {
-                    continue;
-                }
-                if (allowBarrierTouchAt != null && v.distance(allowBarrierTouchAt) <= 1e-3) {
-                    continue;
-                }
-                if (seg.distance(GeoUtil.GF.createPoint(v)) < 0.02) {
-                    return false;
-                }
-            }
-            Geometry portions = seg.intersection(barrier.zone);
-            for (int i = 0; i < portions.getNumGeometries(); i++) {
-                Geometry portion = portions.getGeometryN(i);
-                if (portion.getDimension() < 1) {
-                    continue;
-                }
-                if (!portionNearConnection(portion, allowBarrierTouchAt, barrier)) {
-                    return false; // параллельное дублирование трассы
-                }
+            if (!near) {
+                return false;
             }
         }
         return true;
     }
 
     private boolean checkSpecial(LineString seg, Coordinate a, Coordinate b, double length,
-                                 SpecialObstacle s, List<SpecialInterval> intervals) {
+                                 SpecialObstacle s, List<SpecialInterval> intervals,
+                                 Coordinate sourceConnectionAt) {
+        boolean intersectsCore = s.corePrep.intersects(seg);
+        boolean sourceExit = s.polygonal && intersectsCore && sourceConnectionAt != null
+                && ("road".equals(s.type) || "tram_tracks".equals(s.type))
+                && (sourceConnectionAt.distance(a) <= COORD_EPS || sourceConnectionAt.distance(b) <= COORD_EPS)
+                && covers(s.corePrep, sourceConnectionAt);
+        // Ранний отказ сохраняет быстрый prepared-предикат, но измеряет запас
+        // вдоль самого ребра. Евклидов буфер ошибочно запрещает допустимые
+        // концы косых проходов. Ровно margin (с COORD_EPS) должно хватать.
+        if (s.polygonal && intersectsCore && !sourceExit
+                && lacksPolygonMargin(a, b, length, s)) {
+            return false;
+        }
         // Каждый связный фрагмент ребра внутри зоны близости обязан содержать
         // корректное пересечение ядра препятствия — иначе это прохождение
         // ближе минимального расстояния.
@@ -291,29 +425,74 @@ public class EdgeValidator {
             if (portion.getDimension() < 1) {
                 continue; // касание в точке
             }
-            if (!portion.intersects(s.core)) {
+            // Reuse the immutable core's prepared index for every clipped portion.
+            if (!s.corePrep.intersects(portion)) {
                 return false;
             }
         }
-        if (!s.corePrep.intersects(seg)) {
+        if (!intersectsCore) {
             // Ядро не пересечено; протяжённые фрагменты в зоне близости уже
             // отклонены выше, значит зона задета лишь касанием — допустимо.
             return true;
         }
 
         if (s.polygonal) {
-            return checkPolygonalCrossing(seg, a, b, s, intervals);
+            int firstInterval = intervals.size();
+            if (!checkPolygonalCrossing(seg, a, b, s, intervals, sourceExit ? sourceConnectionAt : null)) {
+                return false;
+            }
+            // Отступ по ДУ не применяется только внутри SPECIAL этого объекта.
+            // При большом габарите/косом угле proximity может продолжаться
+            // дальше трёх метров: обычный хвост нельзя освободить от отступа
+            // лишь потому, что тот же связный фрагмент касается ядра.
+            return proximityCoveredBySpecials(portions, a, b, intervals, firstInterval);
         }
         return checkLinearCrossing(seg, a, b, length, s, intervals);
     }
 
-    private boolean checkPolygonalCrossing(LineString seg, Coordinate a, Coordinate b,
-                                           SpecialObstacle s, List<SpecialInterval> intervals) {
-        // Специальный проход — один прямой участок: повороты (концы ребра)
-        // не должны находиться внутри зоны спецучастка (полигон + 3 м).
-        if (covers(s.boundZonePrep, a) || covers(s.boundZonePrep, b)) {
-            return false;
+    private boolean lacksPolygonMargin(Coordinate a, Coordinate b, double length, SpecialObstacle s) {
+        if (s.marginM <= COORD_EPS) {
+            return covers(s.corePrep, a) || covers(s.corePrep, b);
         }
+        double fraction = Math.min(length, s.marginM - COORD_EPS) / length;
+        Coordinate fromStart = new Coordinate(a.x + (b.x - a.x) * fraction,
+                a.y + (b.y - a.y) * fraction);
+        Coordinate fromEnd = new Coordinate(b.x + (a.x - b.x) * fraction,
+                b.y + (a.y - b.y) * fraction);
+        return s.corePrep.intersects(GeoUtil.segment(a, fromStart))
+                || s.corePrep.intersects(GeoUtil.segment(fromEnd, b));
+    }
+
+    private boolean proximityCoveredBySpecials(Geometry portions, Coordinate a, Coordinate b,
+                                               List<SpecialInterval> intervals, int firstInterval) {
+        for (int i = 0; i < portions.getNumGeometries(); i++) {
+            Geometry portion = portions.getGeometryN(i);
+            if (portion.isEmpty() || portion.getDimension() < 1) continue;
+            Coordinate[] cs = portion.getCoordinates();
+            double p0 = posOnSegment(a, b, cs[0]);
+            double p1 = posOnSegment(a, b, cs[cs.length - 1]);
+            double coveredTo = Math.min(p0, p1), end = Math.max(p0, p1);
+            // JTS не гарантирует порядок компонентов; объединяем покрытие
+            // без предположения об их ориентации и без окон других объектов.
+            boolean advanced;
+            do {
+                double previous = coveredTo;
+                for (int j = firstInterval; j < intervals.size(); j++) {
+                    SpecialInterval interval = intervals.get(j);
+                    if (interval.from <= coveredTo + COORD_EPS && interval.to > coveredTo) {
+                        coveredTo = interval.to;
+                    }
+                }
+                advanced = coveredTo > previous;
+            } while (advanced && coveredTo < end - COORD_EPS);
+            if (coveredTo < end - COORD_EPS) return false;
+        }
+        return true;
+    }
+
+    private boolean checkPolygonalCrossing(LineString seg, Coordinate a, Coordinate b,
+                                           SpecialObstacle s, List<SpecialInterval> intervals,
+                                           Coordinate sourceConnectionAt) {
         // Угол пересечения в точках входа относительно границы полигона
         if (s.minAngleDeg != null) {
             Geometry boundary = s.core.getBoundary();
@@ -329,17 +508,57 @@ public class EdgeValidator {
                 }
             }
         }
-        // Интервалы спецучастка: пересечение ребра с (полигон + 3 м)
-        Geometry inBound = seg.intersection(s.boundZone);
-        for (int i = 0; i < inBound.getNumGeometries(); i++) {
-            Geometry part = inBound.getGeometryN(i);
-            if (part.getDimension() < 1) {
-                continue;
+        if (sourceConnectionAt != null) {
+            // Единственный односторонний допуск — у исходной камеры. На другом
+            // конце каждого прямого участка должен полностью поместиться выход
+            // из полигона и margin вдоль трассы (не евклидов буфер полигона).
+            double length = seg.getLength();
+            boolean sourceAtStart = sourceConnectionAt.distance(a) <= COORD_EPS;
+            Geometry inside = seg.intersection(s.core);
+            boolean found = false;
+            for (int i = 0; i < inside.getNumGeometries(); i++) {
+                Geometry part = inside.getGeometryN(i);
+                if (part.getDimension() < 1) {
+                    // Камера ровно на границе с выходом наружу: внутренняя
+                    // длина нулевая, наружные 3 м прямого прохода сохраняются.
+                    if (!part.isEmpty() && part.distance(GeoUtil.GF.createPoint(sourceConnectionAt)) <= COORD_EPS) {
+                        if (length < s.marginM - COORD_EPS) return false;
+                        intervals.add(new SpecialInterval(sourceAtStart ? 0 : length - s.marginM,
+                                sourceAtStart ? Math.min(length, s.marginM) : length, s.kSpec, s));
+                        found = true;
+                    }
+                    continue;
+                }
+                Coordinate[] cs = part.getCoordinates();
+                double t0 = posOnSegment(a, b, cs[0]);
+                double t1 = posOnSegment(a, b, cs[cs.length - 1]);
+                double from = Math.min(t0, t1), to = Math.max(t0, t1);
+                // При близком отверстии соседние окна могут перекрываться:
+                // их запас также не продолжается за подтверждённую камеру.
+                double start = sourceAtStart ? Math.max(0, from - s.marginM) : from - s.marginM;
+                double end = sourceAtStart ? to + s.marginM : Math.min(length, to + s.marginM);
+                if (start < -COORD_EPS || end > length + COORD_EPS) return false;
+                intervals.add(new SpecialInterval(Math.max(0, start), Math.min(length, end), s.kSpec, s));
+                found = true;
             }
+            return found;
+        }
+        // Каждое пересечение ядра расширяется на margin вдоль трассы.
+        // Сохраняем отдельные raw-окна для глубины; для цены они объединяются.
+        // Касание ядра в точке сохраняет прежнюю проверку угла и получает
+        // симметричный запас относительно этой точки.
+        Geometry inside = seg.intersection(s.core);
+        double length = seg.getLength();
+        for (int i = 0; i < inside.getNumGeometries(); i++) {
+            Geometry part = inside.getGeometryN(i);
+            if (part.isEmpty()) continue;
             Coordinate[] cs = part.getCoordinates();
-            double from = posOnSegment(a, b, cs[0]);
-            double to = posOnSegment(a, b, cs[cs.length - 1]);
-            intervals.add(new SpecialInterval(Math.min(from, to), Math.max(from, to), s.kSpec, s));
+            double t0 = posOnSegment(a, b, cs[0]);
+            double t1 = posOnSegment(a, b, cs[cs.length - 1]);
+            double from = Math.min(t0, t1) - s.marginM;
+            double to = Math.max(t0, t1) + s.marginM;
+            if (from < -COORD_EPS || to > length + COORD_EPS) return false;
+            intervals.add(new SpecialInterval(Math.max(0, from), Math.min(length, to), s.kSpec, s));
         }
         return true;
     }
@@ -375,7 +594,7 @@ public class EdgeValidator {
      * Фрагмент внутри зоны барьера допустим, если объявлена точка присоединения,
      * она лежит на этом барьере и весь фрагмент — в радиусе подхода к ней.
      */
-    private boolean portionNearConnection(Geometry portion, Coordinate connectAt, Barrier barrier) {
+    private static boolean portionNearConnection(Geometry portion, Coordinate connectAt, Barrier barrier) {
         if (connectAt == null
                 || barrier.line.distance(GeoUtil.GF.createPoint(connectAt)) > 0.05) {
             return false;

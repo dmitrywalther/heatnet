@@ -13,9 +13,12 @@ import ru.lct.heatnet.refdata.PipeTable;
 import ru.lct.heatnet.refdata.RestrictionRule;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Строит и кэширует контексты препятствий по условному диаметру новой сети.
@@ -32,6 +35,7 @@ public class ObstacleIndex {
     private static final double NODE_SIMPLIFY = 0.35;
 
     private final InputModel input;
+    private final Set<Object> inputIds;
     private final ru.lct.heatnet.refdata.RestrictionRules rules;
     private final Map<Integer, GradeContext> cache = new HashMap<>();
 
@@ -42,6 +46,23 @@ public class ObstacleIndex {
     public ObstacleIndex(InputModel input, ru.lct.heatnet.refdata.RestrictionRules rules) {
         this.input = input;
         this.rules = rules;
+        Set<Object> ids = new HashSet<>(input.inputIds);
+        input.sources.forEach(s -> ids.add(s.id));
+        input.pipes.forEach(p -> ids.add(p.id));
+        input.chambers.forEach(c -> ids.add(c.id));
+        input.oksPoints.forEach(o -> ids.add(o.id));
+        input.restrictions.forEach(r -> ids.add(r.id));
+        this.inputIds = Collections.unmodifiableSet(ids);
+    }
+
+    /** Исходные ID резервируются при именовании новых объектов, без разбора их формата. */
+    public Set<Object> inputIds() {
+        return inputIds;
+    }
+
+    /** Единая условная глубина верха исходной теплосети: пересечения и врезки. */
+    public double existingNetworkTopDepthM() {
+        return rules.heatNetworkCrossing().getVertical().obstacleTopDepthM;
     }
 
     public synchronized GradeContext forGrade(PipeGrade grade) {
@@ -60,16 +81,17 @@ public class ObstacleIndex {
                     ctx.forbidden.add(forbiddenZone(r.id, r.restrictionType, component,
                             clearance + halfWidth));
                 } else {
-                    ctx.specials.add(specialObstacle(r.id, rule, component, halfWidth));
+                    ctx.specials.add(specialObstacle(r.id, rule, component, clearance, halfWidth));
                 }
             }
         }
 
         // Существующая тепловая сеть: пересечение без врезки — специальный проход
         RestrictionRule crossRule = rules.heatNetworkCrossing();
+        double crossingClearance = crossRule.clearanceForDu(grade.getDu());
         for (InputModel.ExistingPipe pipe : input.pipes) {
             double ownHalf = PipeTable.byDuAtLeast(pipe.diameter).getHalfWidthM();
-            double proximityDist = ownHalf + crossRule.getMinHorizontalDistanceM() + halfWidth;
+            double proximityDist = ownHalf + crossingClearance + halfWidth;
             Geometry proximityGeom = buffer(pipe.utm, proximityDist - BLOCK_EPS);
             RestrictionRule.Vertical baseVertical = crossRule.getVertical();
             RestrictionRule.Vertical vertical = baseVertical == null ? null
@@ -97,9 +119,9 @@ public class ObstacleIndex {
     }
 
     private SpecialObstacle specialObstacle(Object id, RestrictionRule rule,
-                                            Geometry component, double halfWidth) {
+                                            Geometry component, double clearance, double halfWidth) {
         boolean polygonal = component instanceof Polygon;
-        double proximityDist = rule.getMinHorizontalDistanceM() + halfWidth
+        double proximityDist = clearance + halfWidth
                 + (polygonal ? 0 : rule.getOwnHalfWidthM());
         Geometry proximityGeom = buffer(component, proximityDist - BLOCK_EPS);
         Geometry boundZone = null;

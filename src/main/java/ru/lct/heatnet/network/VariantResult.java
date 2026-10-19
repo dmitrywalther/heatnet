@@ -9,6 +9,8 @@ import java.util.List;
 public class VariantResult {
 
     public String variantId;
+    /** ID сводки, не пересекающийся с исходными и созданными объектами. */
+    public String summaryId;
     public String strategyName;
     public int rank;
 
@@ -26,8 +28,13 @@ public class VariantResult {
     public double newNetworkLength;
     public double score;
 
-    /** Суммарная длина, отражающая штрафы за спецпроходы — для отладки. */
+    /** Геометрические ограничения нарушены; такой вариант не готов к выдаче. */
     public boolean clearanceViolated;
+    public final List<VariantDiagnostic> diagnostics = new ArrayList<>();
+
+    public boolean isValid() {
+        return !clearanceViolated && diagnostics.isEmpty();
+    }
 
     public static class Segment {
         public String id;
