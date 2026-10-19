@@ -1,0 +1,13 @@
+# Образ собирается только из pom.xml и src/.
+.git
+target
+data
+*.log
+*.iml
+.idea
+.vscode
+docs
+viz
+samples
+config
+deploy

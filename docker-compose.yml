@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   db:
     image: postgres:15
@@ -26,10 +24,20 @@ services:
       DB_NAME: heatnet
       DB_USER: heatnet
       DB_PASSWORD: heatnet
+      # Значение по умолчанию — для конкурсной машины с 16 ГБ ОЗУ.
+      JAVA_OPTS: ${JAVA_OPTS:--Xmx12g}
+      HEATNET_TRACING_WORKERS: ${HEATNET_TRACING_WORKERS:-1}
+      HEATNET_TRACING_QUEUE_CAPACITY: ${HEATNET_TRACING_QUEUE_CAPACITY:-100}
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
       - appdata:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "5", "http://127.0.0.1:8080/api/v1/rules"]
+      interval: 15s
+      timeout: 6s
+      retries: 5
+      start_period: 60s
 
 volumes:
   pgdata:

@@ -11,6 +11,9 @@ FROM eclipse-temurin:11-jre
 WORKDIR /app
 COPY --from=build /build/target/heatnet-1.0.0.jar app.jar
 RUN mkdir -p /app/data
+# curl входит в Temurin JRE; проверка сборки защищает HTTP healthcheck
+# от незаметного изменения состава базового образа.
+RUN command -v curl
 ENV HEATNET_STORAGE=/app/data
 # по умолчанию — под машину проверки из ТЗ (16 ГБ ОЗУ);
 # на небольшом VPS переопределяется через JAVA_OPTS (см. deploy/)

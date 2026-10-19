@@ -1,11 +1,13 @@
-# Продакшен-надстройка для публичного стенда на небольшом VPS (2+ ГБ ОЗУ).
+# Продакшен-надстройка: минимум 4 ГБ ОЗУ как стартовая конфигурация,
+# один расчёт одновременно. Это не гарантия для произвольных входных данных.
 # Использование (из корня репозитория):
 #   DOMAIN=heatnet.1-2-3-4.nip.io docker compose \
 #       -f docker-compose.yml -f deploy/docker-compose.prod.yml up -d --build
 services:
   app:
     environment:
-      JAVA_OPTS: "-Xmx1400m"
+      JAVA_OPTS: ${JAVA_OPTS:--Xmx2600m}
+      HEATNET_TRACING_WORKERS: ${HEATNET_TRACING_WORKERS:-1}
     restart: unless-stopped
 
   db:
@@ -19,12 +21,13 @@ services:
       - "80:80"
       - "443:443"
     environment:
-      DOMAIN: ${DOMAIN}
+      DOMAIN: ${DOMAIN:?Укажите DOMAIN для HTTPS-стенда}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
     depends_on:
-      - app
+      app:
+        condition: service_healthy
 
 volumes:
   caddy_data:
