@@ -43,7 +43,8 @@
       head.appendChild(node('h3', '', 'ОКС ' + (oks.label ?? '—')));
       head.appendChild(node('span', connected ? 'hc-status' : 'hc-status hc-unconnected', connected ? 'Подключён' : 'Не подключён'));
       container.appendChild(head);
-      container.appendChild(node('p', 'hc-load', fmt(oks.flow_tph) + ' т/ч · вариант ' + (data.variant_id ?? '—')));
+      const variant = options.variantLabel?.(data.variant_id) || 'ID варианта: ' + (data.variant_id ?? '—');
+      container.appendChild(node('p', 'hc-load', fmt(oks.flow_tph) + ' т/ч · ' + variant));
       if (!connected) {
         container.appendChild(node('p', 'hc-message', data.message || 'В этом варианте подключение отсутствует.'));
         (data.notes || []).filter(text => text !== data.message).forEach(text => container.appendChild(node('p', 'hc-note', text)));

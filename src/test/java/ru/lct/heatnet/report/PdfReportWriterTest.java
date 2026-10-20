@@ -18,6 +18,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class PdfReportWriterTest {
 
@@ -90,6 +91,82 @@ class PdfReportWriterTest {
                     "Depth explanation overlaps table row: explanation top=" + explanation.top
                             + ", row bottom=" + row.bottom);
         }
+    }
+
+    @Test
+    void displaysRankAsVariantNumberWhileKeepingTechnicalIds() throws Exception {
+        InputModel input = mapInput();
+        VariantResult v1 = variant("v1", 2, "shared", 200_000);
+        VariantResult v3 = variant("v3", 1, "alternative", 100_000);
+        VariantResult d1 = variant("d1", 2, "shared", 400_000);
+        VariantResult d3 = variant("d3", 1, "alternative", 300_000);
+        // Deliberately not rank order: labels must use rank, not ID or list index.
+        List<VariantResult> base = List.of(v1, v3);
+        List<VariantResult> depth = List.of(d1, d3);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        new PdfReportWriter(input, base, depth).write(out);
+        try (PDDocument document = PDDocument.load(out.toByteArray())) {
+            String text = new PDFTextStripper().getText(document).replaceAll("\\s+", " ");
+            assertTrue(text.contains("Вариант №2 v1 200 000"), text);
+            assertTrue(text.contains("Вариант №1 v3 100 000"), text);
+            assertTrue(text.contains("Вариант №2 d1 400 000"), text);
+            assertTrue(text.contains("Вариант №1 d3 300 000"), text);
+            assertTrue(text.contains("Технический ID"), text);
+            for (VariantResult v : base) {
+                int mapPages = 0;
+                int segmentPages = 0;
+                for (int page = 1; page <= document.getNumberOfPages(); page++) {
+                    PDFTextStripper stripper = new PDFTextStripper();
+                    stripper.setStartPage(page);
+                    stripper.setEndPage(page);
+                    String pageText = stripper.getText(document).replaceAll("\\s+", " ");
+                    if (!pageText.contains("Технический ID: " + v.variantId)) continue;
+                    String title = "Вариант №" + v.rank + " — ";
+                    if (pageText.contains(title + "участки новой сети")) segmentPages++;
+                    if (pageText.contains(title
+                            + (v == v1 ? "совместное подключение" : "альтернативные врезки"))) mapPages++;
+                }
+                assertEquals(1, mapPages, "number and technical ID on the map page");
+                assertEquals(1, segmentPages, "number and technical ID on the segment page");
+            }
+        }
+        assertEquals(List.of("v1", "v3", "d1", "d3"),
+                List.of(v1.variantId, v3.variantId, d1.variantId, d3.variantId));
+        assertEquals(List.of(2, 1, 2, 1), List.of(v1.rank, v3.rank, d1.rank, d3.rank));
+        assertEquals(List.of(200_000.0, 100_000.0, 400_000.0, 300_000.0),
+                List.of(v1.calculatedCost, v3.calculatedCost, d1.calculatedCost, d3.calculatedCost));
+    }
+
+    @Test
+    void missingRankKeepsTechnicalIdWithoutInventingVariantNumber() throws Exception {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        new PdfReportWriter(mapInput(), List.of(variant("legacy-v3", 0, "alternative", 0)),
+                List.of(variant("legacy-d3", -1, "alternative", 0))).write(out);
+        try (PDDocument document = PDDocument.load(out.toByteArray())) {
+            String text = new PDFTextStripper().getText(document).replaceAll("\\s+", " ");
+            assertFalse(text.contains("Вариант №"), "a missing rank must not be replaced by ID/index");
+            assertTrue(text.contains("Технический ID: legacy-v3"), text);
+            assertTrue(text.contains("legacy-d3"), text);
+        }
+    }
+
+    private static VariantResult variant(String id, int rank, String strategy, double cost) {
+        VariantResult result = new VariantResult();
+        result.variantId = id;
+        result.rank = rank;
+        result.strategyName = strategy;
+        result.calculatedCost = cost;
+        return result;
+    }
+
+    private static InputModel mapInput() {
+        InputModel input = new InputModel();
+        InputModel.ExistingPipe pipe = new InputModel.ExistingPipe();
+        pipe.id = "p";
+        pipe.diameter = 100;
+        pipe.utm = GF.createLineString(new Coordinate[]{new Coordinate(0, 0), new Coordinate(100, 0)});
+        input.pipes.add(pipe);
+        return input;
     }
 
     private static final class TextLine {

@@ -149,8 +149,9 @@
       const label = /^ОКС(?:\s|$)/i.test(rawLabel) ? rawLabel : `ОКС ${rawLabel}`.trim();
       const rawSource = String(profile.source?.label || '').trim();
       const sourceLabel = /^Врезка(?:\s|$)/i.test(rawSource) ? rawSource : `Врезка ${rawSource}`.trim();
+      const variant = options.variantLabel?.(profile.variant_id) || 'ID варианта: ' + (profile.variant_id ?? '—');
       shell(`Продольный профиль · ${label}`,
-        `${sourceLabel} → ${label} · ${fmt(profile.total_length)} м · ${profile.variant_id || ''}`);
+        `${sourceLabel} → ${label} · ${fmt(profile.total_length)} м · ${variant}`);
       const topDepths = profile.segments.flatMap(s => [s.depth_start, s.depth_end]);
       const maxSlope = Math.max(...profile.segments.map(s => Math.abs((s.depth_end - s.depth_start) / (s.to - s.from)))) * 100;
       container.appendChild(html('p', 'hp-stats',

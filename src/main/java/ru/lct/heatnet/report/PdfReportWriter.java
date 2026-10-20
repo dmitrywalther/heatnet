@@ -124,19 +124,22 @@ public class PdfReportWriter {
         y -= 14;
 
         heading("Сравнение вариантов");
+        paragraph("Номер варианта — место по показателю S в своём режиме. "
+                + "Технический ID сохраняется в GeoJSON и API.", 9, MUTED);
+        y -= 6;
         List<String[]> rows = new ArrayList<>();
         for (VariantResult v : variants) {
             rows.add(new String[]{
-                    String.valueOf(v.rank),
-                    v.variantId + " — " + strategyRu(v.strategyName),
+                    variantLabel(v),
+                    v.variantId,
                     fmt(v.calculatedCost, 0),
                     fmt(v.newNetworkLength, 0),
                     fmt(v.score, 4),
                     v.unconnectedOksIds.isEmpty() ? "нет"
                             : String.valueOf(v.unconnectedOksIds.size())});
         }
-        table(new String[]{"Место", "Вариант", "Стоимость, руб.", "Длина, м", "Score", "Не подкл."},
-                new float[]{45, 190, 110, 70, 60, 55},
+        table(new String[]{"Вариант", "Технический ID", "Стоимость, руб.", "Длина, м", "Score", "Не подкл."},
+                new float[]{96, 99, 108, 76, 67, 65},
                 new boolean[]{false, false, true, true, true, false}, rows);
         y -= 16;
 
@@ -170,14 +173,14 @@ public class PdfReportWriter {
                                     || Math.abs(s.depthEnd - 3.0) > 1e-9))
                         .count();
                 depthRows.add(new String[]{
-                        String.valueOf(v.rank),
-                        v.variantId + " — " + strategyRu(v.strategyName),
+                        variantLabel(v),
+                        v.variantId,
                         fmt(v.calculatedCost, 0),
                         fmt(v.score, 4),
                         deepened == 0 ? "профиль 3,0 м" : deepened + " уч. с изм. глубиной"});
             }
-            table(new String[]{"Место", "Вариант", "Стоимость, руб.", "Score", "Профиль"},
-                    new float[]{45, 180, 110, 60, 135},
+            table(new String[]{"Вариант", "Технический ID", "Стоимость, руб.", "Score", "Профиль"},
+                    new float[]{96, 99, 108, 67, 141},
                     new boolean[]{false, false, true, true, false}, depthRows);
             y -= 12;
             paragraph("Маршруты вертикально спланированы вдоль тех же трасс: пересечения "
@@ -203,8 +206,8 @@ public class PdfReportWriter {
     private void variantPages(VariantResult v, MapRenderer renderer) throws IOException {
         // --- страница с картой и разбивкой стоимости ---
         newPage();
-        title("Вариант " + v.variantId + " — " + strategyRu(v.strategyName));
-        text(MARGIN, y, regular, 11, MUTED, "Место в ранжировании: " + v.rank
+        title(variantLabel(v) + " — " + strategyRu(v.strategyName));
+        text(MARGIN, y, regular, 11, MUTED, "Технический ID: " + v.variantId
                 + "   ·   score " + fmt(v.score, 4));
         y -= 24;
 
@@ -226,7 +229,9 @@ public class PdfReportWriter {
 
         // --- таблица участков ---
         newPage();
-        title("Вариант " + v.variantId + " — участки новой сети");
+        title(variantLabel(v) + " — участки новой сети");
+        text(MARGIN, y, regular, 11, MUTED, "Технический ID: " + v.variantId);
+        y -= 20;
         List<String[]> rows = new ArrayList<>();
         int idx = 1;
         for (VariantResult.Segment s : v.segments) {
@@ -600,6 +605,10 @@ public class PdfReportWriter {
             total += w;
         }
         return total;
+    }
+
+    private static String variantLabel(VariantResult variant) {
+        return variant.rank > 0 ? "Вариант №" + variant.rank : "Вариант";
     }
 
     private static String strategyRu(String strategy) {

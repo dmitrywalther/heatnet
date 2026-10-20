@@ -118,14 +118,18 @@
   #compare-toggle.on { border-color: #2f8fe0; color: #2f8fe0; font-weight: 600; }
   #compare-stats { margin-top: 10px; border-top: 1px solid var(--accent-soft);
     padding-top: 8px; font-size: 12.5px; display: grid;
-    grid-template-columns: auto 1fr 1fr 1fr; gap: 4px 10px; }
+    grid-template-columns: repeat(3, minmax(max-content, 1fr)); gap: 4px 6px; overflow-x: auto; }
   #compare-stats[hidden] { display: none; }
-  #compare-stats .h { color: var(--muted); font-size: 11px; }
-  #compare-stats .num { font-family: Consolas, monospace; font-variant-numeric: tabular-nums; }
+  #compare-stats .h { color: var(--muted); font-size: 10.5px; }
+  #compare-stats .metric { grid-column: 1 / -1; margin-top: 4px; }
+  #compare-stats .num { font-family: Consolas, monospace; font-variant-numeric: tabular-nums;
+    font-size: 10.5px; white-space: nowrap; }
   #compare-stats .va { color: var(--accent); font-weight: 600; }
   #compare-stats .vb { color: #2f8fe0; font-weight: 600; }
   #compare-stats .delta { font-weight: 600; }
   .variant .vname { font-weight: 600; }
+  .variant .vid { margin-left: 6px; color: var(--muted); font-size: 11px; }
+  .variant-numbering { margin: 4px 0; color: var(--muted); font-size: 11px; line-height: 1.4; }
   .variant .vstats { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
   .modes { display: flex; gap: 6px; }
   .modes button { flex: 1; font-size: 12.5px; padding: 7px 6px; }
@@ -325,6 +329,7 @@
         <button id="mode-2d" class="active">Базовый 2D</button>
         <button id="mode-depth">С учётом глубины</button>
       </div>
+      <p class="variant-numbering">Номер — место по показателю S в выбранном режиме. ID — постоянный идентификатор в файлах и API.</p>
       <div class="variants" id="variants"></div>
       <button class="ghost" id="compare-toggle">⇄ Сравнить два варианта</button>
       <div id="compare-stats" hidden></div>
@@ -968,6 +973,17 @@
     return Object.values(map).sort((a, b) => (a.summary?.rank || 9) - (b.summary?.rank || 9));
   }
 
+  function variantTitle(summary) {
+    const rank = summary?.rank;
+    return 'Вариант' + (Number.isSafeInteger(rank) && rank > 0 ? ' №' + rank : '');
+  }
+
+  function variantLabel(id) {
+    const summary = modeData[mode]?.features?.find(f =>
+      f.properties?.object_type === 'variant_summary' && f.properties.variant_id === id)?.properties;
+    return variantTitle(summary) + ' · ID: ' + (id ?? '—');
+  }
+
   // ---------- режим сравнения двух вариантов ----------
   let compareVariant = null;   // id варианта B; null — сравнение выключено
   $('compare-toggle').addEventListener('click', () => {
@@ -989,7 +1005,8 @@
       const b = document.createElement('button');
       b.className = 'variant';
       const s = g.summary || {};
-      b.innerHTML = '<span class="vname">#' + (s.rank || '?') + ' · вариант ' + g.id + '</span><br>'
+      b.innerHTML = '<span class="vname">' + variantTitle(s) + '</span>'
+        + '<span class="vid">ID: ' + escapeHtml(g.id) + '</span><br>'
         + '<span class="vstats">' + fmtRub(s.calculated_cost || 0) + ' · ' + fmtM(s.new_network_length || 0)
         + ' · score ' + (s.score ?? '—') + '</span>';
       b.addEventListener('click', () => {
@@ -1038,15 +1055,15 @@
     const sa = a.summary || {}, sb = b.summary || {};
     const fmtD = (v, f) => (v > 0 ? '+' : v < 0 ? '−' : '') + f(Math.abs(v));
     box.innerHTML =
-      '<div class="h"></div><div class="h va">' + a.id + ' (розовый)</div>'
-      + '<div class="h vb">' + b.id + ' (синий)</div><div class="h">Δ (' + b.id + ' − ' + a.id + ')</div>'
-      + '<div class="h">стоимость</div><div class="num">' + fmtRub(sa.calculated_cost || 0) + '</div>'
+      '<div class="h va">A · ' + variantTitle(sa) + '<br>ID: ' + escapeHtml(a.id) + '<br>(розовый)</div>'
+      + '<div class="h vb">B · ' + variantTitle(sb) + '<br>ID: ' + escapeHtml(b.id) + '<br>(синий)</div><div class="h">Δ (B − A)</div>'
+      + '<div class="h metric">стоимость</div><div class="num">' + fmtRub(sa.calculated_cost || 0) + '</div>'
       + '<div class="num">' + fmtRub(sb.calculated_cost || 0) + '</div>'
       + '<div class="num delta">' + fmtD((sb.calculated_cost || 0) - (sa.calculated_cost || 0), fmtRub) + '</div>'
-      + '<div class="h">длина</div><div class="num">' + fmtM(sa.new_network_length || 0) + '</div>'
+      + '<div class="h metric">длина</div><div class="num">' + fmtM(sa.new_network_length || 0) + '</div>'
       + '<div class="num">' + fmtM(sb.new_network_length || 0) + '</div>'
       + '<div class="num delta">' + fmtD((sb.new_network_length || 0) - (sa.new_network_length || 0), fmtM) + '</div>'
-      + '<div class="h">score</div><div class="num">' + (sa.score ?? '—') + '</div>'
+      + '<div class="h metric">score</div><div class="num">' + (sa.score ?? '—') + '</div>'
       + '<div class="num">' + (sb.score ?? '—') + '</div>'
       + '<div class="num delta">' + fmtD((sb.score || 0) - (sa.score || 0), v => v.toFixed(4)) + '</div>';
     box.hidden = false;
@@ -1059,6 +1076,7 @@
   let activeProfile = null, profileMapOverlay = null, profileMarker = null, profileHoverId = null;
   const connectionView = HeatnetConnectionCard.create({
     container: $('connection-card'), onTarget: focusConnectionTarget,
+    variantLabel: id => variantLabel(id),
     onRetry: () => {
       if (profileOks.some(oks => oks.key === selectedOksKey)) selectProfileOks(selectedOksKey, profileWanted);
       else { profileContext = null; syncProfile(); }
@@ -1066,6 +1084,7 @@
   });
   const profileView = HeatnetProfile.create({
     container: $('profile-panel'),
+    variantLabel: id => variantLabel(id),
     onSegmentHover: id => { profileHoverId = id; connectionTarget = null; if (id == null) profileMarker = null;
       connectionView.highlightSegment(id); drawProfileOverlay(); },
     onPosition: position => { profileMarker = position && position.coordinate; drawProfileOverlay(); },
@@ -1646,7 +1665,7 @@
       ['Участок', p.id],
       ['ДУ', p.diameter + ' мм'],
     ];
-    if (compareVariant) rows.unshift(['Вариант', p.variant_id]);
+    if (compareVariant) rows.unshift(['Вариант', escapeHtml(variantLabel(p.variant_id))]);
     rows.push(
       ['Расход', p.flow_tph + ' т/ч'],
       ['Длина', fmtM(p.length)],
