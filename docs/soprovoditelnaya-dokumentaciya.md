@@ -781,8 +781,6 @@ SHA-256 JAR:
 Данные публикации, точный commit, проверки Docker/PostgreSQL/HTTPS и порядок
 отката сохраняются в рабочей области:
 `context/geometry-release-2026-10-20/RESULTS.md` и `OPERATIONS.md`.
-SHA-256 JAR:
-`03c64de172b0870382ec5ba237e6c05cd0ad9157d3c7198846889b021f24ce28`.
 
 ---
 
