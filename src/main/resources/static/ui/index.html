@@ -34,14 +34,14 @@
   header h1 b { color: var(--accent); }
   header .sub { color: var(--muted); font-size: 12.5px; }
   main { flex: 1; display: flex; min-height: 0; }
-  aside {
-    width: 370px; flex: none; overflow-y: auto; padding: 14px;
+  #workflow-sidebar {
+    width: 350px; flex: none; overflow-y: auto; padding: 14px;
     display: flex; flex-direction: column; gap: 12px;
     background: var(--card); border-right: 1px solid var(--line);
   }
   section.card {
     border: 1px solid var(--line); border-radius: 8px; padding: 12px;
-    display: flex; flex-direction: column; gap: 8px;
+    display: flex; flex-direction: column; gap: 8px; min-width: 0;
   }
   .label {
     font-size: 11px; font-weight: 600; letter-spacing: .1em;
@@ -155,14 +155,21 @@
   .bd-row.bd-total .bd-line { font-weight: 600; }
   .bd-row.bd-total .bd-track { background: #2b2140; }
   .downloads { display: flex; flex-wrap: wrap; gap: 6px; }
-  #map-column { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
-  #map-wrap { flex: 1; position: relative; min-width: 0; min-height: 180px; }
-  #profile-panel { flex: none; max-height: 46vh; overflow: auto; background: white;
+  #map-column { flex: 1; min-width: 0; min-height: 0; display: grid;
+    grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: minmax(180px, 1fr) auto; }
+  #map-row { display: contents; }
+  #map-wrap { grid-column: 1; grid-row: 1; position: relative; min-width: 0; min-height: 180px; }
+  #profile-panel { grid-column: 1; grid-row: 2; min-width: 0; max-height: 46vh; overflow: auto; background: white;
     border-top: 1px solid var(--line); }
-  #profile-controls { border-top: 1px solid var(--line); padding-top: 10px; }
+  #profile-controls { grid-column: 2; grid-row: 1 / 3; width: 340px; min-width: 0; min-height: 0; overflow-y: auto;
+    padding: 16px; border-left: 1px solid var(--line); background: var(--card); }
+  #connection-title { margin: 0 0 4px; font-size: 17px; color: var(--deep); }
+  .connection-intro { margin: 0 0 14px; font-size: 12px; color: var(--muted); }
   #profile-controls label { display: block; font-size: 12px; color: var(--purple); margin-bottom: 5px; }
-  #profile-oks { max-width: 100%; padding: 6px; border: 1px solid var(--line); border-radius: 5px; }
-  #profile-help { margin: 6px 0; font-size: 11.5px; color: var(--muted); }
+  #profile-oks { width: 100%; min-width: 0; padding: 8px; font: inherit;
+    border: 1px solid var(--line); border-radius: 6px; background: white; color: var(--ink); }
+  .connection-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  #profile-help { margin: 8px 0 0; font-size: 11.5px; color: var(--muted); }
   #map { width: 100%; height: 100%; display: block; cursor: grab; background: #fff; }
   #map.drag { cursor: grabbing; }
   #tooltip {
@@ -242,6 +249,31 @@
     border-radius: 10px; padding: 14px 22px;
   }
   a.plain { color: var(--purple); }
+  @media (max-width: 1200px) {
+    #workflow-sidebar { width: 320px; }
+    #map-column { display: flex; flex-direction: column; overflow-y: auto; }
+    #map-wrap { flex: none; height: 52vh; min-height: 360px; }
+    #profile-controls { flex: none; width: auto; overflow: visible;
+      border-left: 0; border-top: 1px solid var(--line); }
+    #profile-panel { flex: none; max-height: none; overflow: visible; }
+  }
+  @media (max-width: 800px) {
+    html, body { height: auto; min-height: 100%; }
+    body { min-height: 100vh; }
+    main { flex-direction: column; }
+    #workflow-sidebar { width: 100%; overflow: visible; border-right: 0;
+      border-bottom: 1px solid var(--line); display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+    #results { grid-column: 1 / -1; }
+    #map-column { flex: none; overflow: visible; }
+    #map-wrap { height: 55vh; }
+    #legend { max-width: calc(100% - 24px); font-size: 11px; }
+    #legend .row { flex-wrap: wrap; }
+  }
+  @media (max-width: 600px) {
+    #workflow-sidebar { grid-template-columns: minmax(0, 1fr); }
+    header { padding: 10px 14px; }
+  }
 </style>
 </head>
 <body>
@@ -250,7 +282,7 @@
   <span class="sub">Лидеры цифровой трансформации 2026 · вход и выход — GeoJSON (WGS 84) · <a class="plain" href="/swagger-ui.html" target="_blank" rel="noopener">Swagger API</a> · <a class="plain" href="algorithm.html" target="_blank" rel="noopener">Как работает алгоритм</a></span>
 </header>
 <main>
-  <aside>
+  <aside id="workflow-sidebar" aria-label="Настройка расчёта и варианты сети">
     <section class="card">
       <div class="label">1 · Входные данные</div>
       <div id="drop" tabindex="0" role="button" aria-label="Выбрать входной файл GeoJSON">
@@ -294,13 +326,6 @@
         <button id="mode-depth">С учётом глубины</button>
       </div>
       <div class="variants" id="variants"></div>
-      <div id="profile-controls" hidden>
-        <label for="profile-oks">Подключение ОКС</label>
-        <select id="profile-oks" aria-label="ОКС для карточки подключения и профиля"></select>
-        <button class="ghost" id="profile-open">Показать профиль</button>
-        <p id="profile-help">Выберите ОКС в списке или на карте. Карточка и профиль относятся к основному выбранному варианту.</p>
-        <section id="connection-card" aria-label="Карточка подключения выбранного ОКС" hidden></section>
-      </div>
       <button class="ghost" id="compare-toggle">⇄ Сравнить два варианта</button>
       <div id="compare-stats" hidden></div>
       <div id="summary"></div>
@@ -317,6 +342,7 @@
   </aside>
 
   <div id="map-column">
+  <div id="map-row">
   <div id="map-wrap">
     <svg id="map" aria-label="Карта трассировки"></svg>
     <div id="hint"><span>Загрузите входной GeoJSON и запустите расчёт —<br>карта района и варианты трассировки появятся здесь</span></div>
@@ -340,6 +366,19 @@
       <div class="row"><svg width="30" height="12"><circle cx="15" cy="6" r="4.5" fill="#310F53"/></svg>точки подключения ОКС</div>
       <div class="row"><svg width="30" height="12"><circle cx="15" cy="6" r="4.5" fill="#FF0053"/></svg>новые камеры · <svg width="14" height="12"><circle cx="7" cy="6" r="4" fill="#fff" stroke="#FF0053" stroke-width="1.5"/></svg> техузлы</div>
     </div>
+  </div>
+  <section id="profile-controls" aria-labelledby="connection-title" hidden>
+    <h2 id="connection-title">Подключение ОКС</h2>
+    <p class="connection-intro">Путь от существующей сети до выбранного здания</p>
+    <label for="profile-oks">Выберите ОКС</label>
+    <select id="profile-oks" aria-label="ОКС для карточки подключения и профиля" aria-describedby="profile-help"></select>
+    <div class="connection-actions">
+      <button class="ghost" id="profile-open">Показать профиль</button>
+      <button class="ghost" id="connection-download" type="button" disabled>Скачать паспорт ОКС (PDF)</button>
+    </div>
+    <p id="profile-help">Выберите ОКС в списке или на карте. Карточка и профиль относятся к основному выбранному варианту.</p>
+    <section id="connection-card" aria-label="Карточка подключения выбранного ОКС" hidden></section>
+  </section>
   </div>
   <section id="profile-panel" aria-label="Продольный профиль выбранного ОКС" hidden></section>
   </div>
@@ -1053,6 +1092,7 @@
     profileMarker = null;
     profileMapOverlay?.remove(); profileMapOverlay = null;
     $('profile-controls').hidden = true;
+    $('connection-download').disabled = true;
     $('profile-panel').hidden = true;
     $('profile-oks').replaceChildren();
     profileView.clear();
@@ -1075,6 +1115,19 @@
     return '/api/v1/tracing/jobs/' + encodeURIComponent(jobId)
       + '/connection?variant_id=' + encodeURIComponent(currentVariant);
   }
+
+  function connectionPassportReady() {
+    return Boolean(activeConnection && jobId && currentVariant && selectedOksKey
+      && profileContext === jobId + '/' + mode + '/' + currentVariant
+      && activeConnection.variant_id === currentVariant && activeConnection.oks?.key === selectedOksKey);
+  }
+
+  $('connection-download').addEventListener('click', () => {
+    if (!connectionPassportReady()) return;
+    window.open('/api/v1/tracing/jobs/' + encodeURIComponent(jobId)
+      + '/connection.pdf?variant_id=' + encodeURIComponent(currentVariant)
+      + '&oks_key=' + encodeURIComponent(selectedOksKey), '_blank', 'noopener');
+  });
 
   function syncProfile() {
     if (!jobId || !currentVariant) {
@@ -1126,6 +1179,7 @@
     const version = ++connectionVersion, context = profileContext;
     profileVersion++;
     activeConnection = null; connectionTarget = null;
+    $('connection-download').disabled = true;
     activeProfile = null; profileHoverId = null; profileMarker = null;
     profileView.clear();
     drawProfileOverlay();
@@ -1134,6 +1188,7 @@
     readProfileResponse(connectionUrl() + '&oks_key=' + encodeURIComponent(key)).then(data => {
       if (version !== connectionVersion || context !== profileContext) return;
       activeConnection = data; connectionView.setData(data); drawProfileOverlay();
+      $('connection-download').disabled = !connectionPassportReady();
     }).catch(error => {
       if (version !== connectionVersion || context !== profileContext) return;
       connectionView.setMessage('Не удалось загрузить карточку: ' + error.message, true);
@@ -1160,10 +1215,13 @@
   $('profile-open').addEventListener('click', () => {
     if (mode !== 'depth') return;
     profileWanted = true;
-    if (activeProfile) { profileView.setData(activeProfile); $('profile-panel').hidden = false; return; }
-    const choice = profileOks.find(oks => oks.key === selectedOksKey && oks.connected);
-    if (choice) loadSelectedProfile(choice);
-    else { profileContext = null; syncProfile(); }
+    if (activeProfile) { profileView.setData(activeProfile); $('profile-panel').hidden = false; }
+    else {
+      const choice = profileOks.find(oks => oks.key === selectedOksKey && oks.connected);
+      if (choice) loadSelectedProfile(choice);
+      else { profileContext = null; syncProfile(); }
+    }
+    if (!$('profile-panel').hidden) $('profile-panel').scrollIntoView?.({ block: 'nearest' });
   });
 
   // Display marker only: this interpolation does not change exported lengths or routing.

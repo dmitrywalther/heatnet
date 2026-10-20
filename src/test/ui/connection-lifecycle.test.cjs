@@ -7,6 +7,7 @@ const list={oks:[{key:'n:2',label:'2',connected:true,coordinates:[37,55]},{key:'
 const card={variant_id:'v1',status:'connected',oks:list.oks[0],segments:[]};
 function element(){return {hidden:false,disabled:false,children:[],handlers:{},style:{},classList:{add(){},toggle(){}},
  appendChild(x){this.children.push(x);return x;},replaceChildren(...x){this.children=x;},remove(){},setAttribute(){},
+ scrollCalls:[],scrollIntoView(options){this.scrollCalls.push({block:options.block,hidden:this.hidden});},
  addEventListener(k,v){this.handlers[k]=v;},set textContent(x){this.text=x;},get textContent(){return this.text||'';}};}
 function harness(fetcher,mode='2d'){
  const nodes=new Map(),cards=[],profiles=[],calls=[];let profileOptions,connectionOptions;
@@ -62,4 +63,39 @@ test('retrying the card respects a profile that the user closed',async()=>{
  h.connectionOptions.onRetry();await flush();
  assert.equal(h.$('profile-panel').hidden,true);
  assert.equal(h.calls.filter(u=>u.includes('/profile?')).length,before);
+});
+test('explicitly reopening a cached profile reveals it without scrolling on automatic selection',async()=>{
+ const h=harness(url=>ok(url.includes('oks_key=')?{...card,variant_id:'d1'}:list),'depth');
+ h.eval('syncProfile()');await flush();
+ const panel=h.$('profile-panel');
+ assert.deepEqual(panel.scrollCalls,[]);
+ h.profileOptions.onClose();
+ const requests=h.calls.length;
+ h.$('profile-open').handlers.click();
+ assert.equal(panel.hidden,false);
+ assert.deepEqual(panel.scrollCalls,[{block:'nearest',hidden:false}]);
+ assert.equal(h.calls.length,requests,'A cached profile must not be requested again');
+});
+test('explicitly opening a pending profile reveals its loading state before the response',async()=>{
+ const pending=deferred();
+ const h=harness(url=>url.includes('/profile?')?pending.promise:
+   ok(url.includes('oks_key=')?{...card,variant_id:'d1'}:list),'depth');
+ h.eval('syncProfile()');await flush();
+ const panel=h.$('profile-panel');
+ assert.deepEqual(panel.scrollCalls,[]);
+ h.profileOptions.onClose();
+ h.$('profile-open').handlers.click();
+ assert.equal(panel.hidden,false);
+ assert.deepEqual(panel.scrollCalls,[{block:'nearest',hidden:false}]);
+ pending.resolve(ok({...card,variant_id:'d1'}));await flush();
+ assert.equal(panel.scrollCalls.length,1,'Completing the response must not move the viewport again');
+});
+test('opening a profile in base mode does not scroll or request a depth profile',async()=>{
+ const h=harness(url=>ok(url.includes('oks_key=')?card:list));
+ h.eval('syncProfile()');await flush();
+ const requests=h.calls.length;
+ h.$('profile-open').handlers.click();
+ assert.equal(h.$('profile-panel').hidden,true);
+ assert.deepEqual(h.$('profile-panel').scrollCalls,[]);
+ assert.equal(h.calls.length,requests);
 });
