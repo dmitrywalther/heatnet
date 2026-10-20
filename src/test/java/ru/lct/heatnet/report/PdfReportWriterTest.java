@@ -150,6 +150,121 @@ class PdfReportWriterTest {
         }
     }
 
+    @Test
+    void comparesAlternativesByRankSeparatelyForBaseAndDepth() throws Exception {
+        InputModel input = mapInput();
+        addOks(input, 7, 100, 20);
+        addOks(input, "7", 120, 20);
+        addOks(input, "missing", 140, 20);
+        addOks(input, 25, 160, 20);
+        VariantResult a = variant("v3", 1, "alternative", 100_000);
+        a.constructionCost = 80_000;
+        a.unconnectedPenalty = 20_000;
+        a.newNetworkLength = 200;
+        a.score = 0.6028;
+        a.unconnectedOksIds.addAll(List.of("7", "missing"));
+        VariantResult b = variant("v1", 2, "shared", 190_000);
+        b.constructionCost = 150_000;
+        b.unconnectedPenalty = 40_000;
+        b.newNetworkLength = 260.5;
+        b.score = 0.78682;
+        b.unconnectedOksIds.addAll(List.of(7, "missing"));
+        VariantResult da = variant("d1", 1, "shared", 450_000);
+        VariantResult db = variant("d3", 2, "alternative", 500_000);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        new PdfReportWriter(input, List.of(b, a), List.of(db, da)).write(out);
+        try (PDDocument document = PDDocument.load(out.toByteArray())) {
+            String base = pageContaining(document, "Сравнение трасс: базовый режим");
+            String depth = pageContaining(document, "Сравнение трасс: режим с глубиной");
+            assertTrue(base.contains("A: Вариант №1 · v3"), base);
+            assertTrue(base.contains("B: Вариант №2 · v1"), base);
+            assertTrue(base.contains("Строительство, руб. 80 000 150 000 +70 000"), base);
+            assertTrue(base.contains("Штрафы, руб. 20 000 40 000 +20 000"), base);
+            assertTrue(base.contains("Итоговая стоимость, руб. 100 000 190 000 +90 000"), base);
+            assertTrue(base.contains("Длина новой сети, м 200,00 260,50 +60,50"), base);
+            assertTrue(base.contains("Подключено ОКС 2 / 4 2 / 4 0"), base);
+            assertTrue(base.contains("Появляются в B: s:7"), base);
+            assertTrue(base.contains("Теряются в B: n:7"), base);
+            assertTrue(base.contains("Не подключены в обоих: s:missing"), base);
+            assertTrue(depth.contains("A: Вариант №1 · d1"), depth);
+            assertTrue(depth.contains("B: Вариант №2 · d3"), depth);
+            assertTrue(depth.contains("450 000 500 000 +50 000"), depth);
+            assertFalse(depth.contains("n:7"), "base connectivity must not leak into depth");
+        }
+        assertEquals(List.of("v1", "v3"), List.of(b.variantId, a.variantId),
+                "Reporting must not reorder or relabel the caller's variants");
+        assertEquals(List.of("7", "missing"), a.unconnectedOksIds);
+    }
+
+    @Test
+    void explainsMissingPairWithoutComparingModes() throws Exception {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        new PdfReportWriter(mapInput(), List.of(variant("v1", 1, "shared", 100)),
+                List.of(variant("d3", 1, "alternative", 500))).write(out);
+        try (PDDocument document = PDDocument.load(out.toByteArray())) {
+            String text = new PDFTextStripper().getText(document).replaceAll("\\s+", " ");
+            assertTrue(text.contains("Базовый режим: доступен только один вариант; пары для сравнения нет."), text);
+            assertTrue(text.contains("Режим с глубиной: доступен только один вариант; пары для сравнения нет."), text);
+            assertFalse(text.contains("Δ B − A"), "A base result must never be paired with a depth result");
+        }
+    }
+
+    @Test
+    void numericIdentityIsExactAndIndependentOfNumberRepresentation() throws Exception {
+        InputModel input = mapInput();
+        addOks(input, new java.math.BigDecimal("9007199254740993.00"), 100, 20);
+        addOks(input, "9007199254740993", 120, 20);
+        VariantResult a = variant("v1", 1, "shared", 0);
+        VariantResult b = variant("v3", 2, "alternative", 0);
+        a.unconnectedOksIds.add(9007199254740993L);
+        b.unconnectedOksIds.add(new java.math.BigDecimal("9007199254740993.0"));
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        new PdfReportWriter(input, List.of(a, b)).write(out);
+        try (PDDocument document = PDDocument.load(out.toByteArray())) {
+            String comparison = pageContaining(document, "Сравнение трасс: базовый режим");
+            assertTrue(comparison.contains("Появляются в B: нет"), comparison);
+            assertTrue(comparison.contains("Теряются в B: нет"), comparison);
+            assertTrue(comparison.contains("Не подключены в обоих: n:9007199254740993"), comparison);
+            assertTrue(comparison.contains("Подключено ОКС 1 / 2 1 / 2 0"), comparison);
+        }
+    }
+
+    @Test
+    void comparisonDeltasAgreeWithDisplayedRoundedValuesAndDoNotInventRank() throws Exception {
+        VariantResult a = variant("legacy-v1", 0, "shared", 100.49);
+        VariantResult b = variant("legacy-v3", 0, "alternative", 100.51);
+        a.newNetworkLength = 100.004;
+        b.newNetworkLength = 100.006;
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        new PdfReportWriter(mapInput(), List.of(a, b)).write(out);
+        try (PDDocument document = PDDocument.load(out.toByteArray())) {
+            String comparison = pageContaining(document, "Сравнение трасс: базовый режим");
+            assertTrue(comparison.contains("Итоговая стоимость, руб. 100 101 +1"), comparison);
+            assertTrue(comparison.contains("Длина новой сети, м 100,00 100,01 +0,01"), comparison);
+            assertTrue(comparison.contains("A: Вариант · legacy-v1"), comparison);
+            assertTrue(comparison.contains("Ранжирование не задано"), comparison);
+            assertFalse(comparison.contains("Вариант №"), comparison);
+        }
+    }
+
+    private static String pageContaining(PDDocument document, String title) throws IOException {
+        for (int page = 1; page <= document.getNumberOfPages(); page++) {
+            PDFTextStripper stripper = new PDFTextStripper();
+            stripper.setStartPage(page);
+            stripper.setEndPage(page);
+            String text = stripper.getText(document).replaceAll("\\s+", " ");
+            if (text.contains(title)) return text;
+        }
+        throw new AssertionError("Missing report section: " + title);
+    }
+
+    private static void addOks(InputModel input, Object id, double x, double yy) {
+        InputModel.OksPoint point = new InputModel.OksPoint();
+        point.id = id;
+        point.utm = GF.createPoint(new Coordinate(x, yy));
+        input.oksPoints.add(point);
+    }
+
     private static VariantResult variant(String id, int rank, String strategy, double cost) {
         VariantResult result = new VariantResult();
         result.variantId = id;

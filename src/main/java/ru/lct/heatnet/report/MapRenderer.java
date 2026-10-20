@@ -23,6 +23,8 @@ import java.util.List;
  */
 public class MapRenderer {
 
+    static final Color COMPARISON_A = new Color(0xFF, 0x00, 0x53);
+    static final Color COMPARISON_B = new Color(0x2F, 0x8F, 0xE0);
     private static final Color BUILDING_FILL = new Color(0xEB, 0xE5, 0xF2);
     private static final Color BUILDING_EDGE = new Color(0xB8, 0xAB, 0xCB);
     private static final Color WATER = new Color(0xC9, 0xDE, 0xF0);
@@ -38,8 +40,12 @@ public class MapRenderer {
     private final Envelope extent;
 
     public MapRenderer(InputModel input) {
+        this(input, computeExtent(input));
+    }
+
+    private MapRenderer(InputModel input, Envelope extent) {
         this.input = input;
-        this.extent = computeExtent(input);
+        this.extent = extent;
     }
 
     private static Envelope computeExtent(InputModel input) {
@@ -59,6 +65,31 @@ public class MapRenderer {
 
     /** Рисует карту варианта в изображение заданного размера. */
     public BufferedImage render(VariantResult variant, int widthPx, int heightPx) {
+        return render(variant, null, widthPx, heightPx);
+    }
+
+    /** Обе сети в одном охвате; широкая A остаётся видимой под узкой штриховой B. */
+    public BufferedImage renderComparison(VariantResult a, VariantResult b, int widthPx, int heightPx) {
+        Envelope combined = new Envelope(extent);
+        for (VariantResult v : List.of(a, b)) {
+            for (VariantResult.Segment s : v.segments) {
+                for (Coordinate coordinate : s.utmCoords) combined.expandToInclude(coordinate);
+            }
+            for (VariantResult.Chamber c : v.chambers) combined.expandToInclude(c.utm);
+            for (VariantResult.TechNode n : v.techNodes) combined.expandToInclude(n.utm);
+        }
+        for (InputModel.ExistingChamber c : input.chambers) {
+            combined.expandToInclude(c.utm.getCoordinate());
+        }
+        for (InputModel.SourcePoint source : input.sources) {
+            combined.expandToInclude(source.utm.getCoordinate());
+        }
+        combined.expandBy(Math.max(10, Math.max(combined.getWidth(), combined.getHeight()) * 0.02));
+        return new MapRenderer(input, combined).render(a, b, widthPx, heightPx);
+    }
+
+    private BufferedImage render(VariantResult variant, VariantResult alternative,
+                                 int widthPx, int heightPx) {
         BufferedImage image = new BufferedImage(widthPx, heightPx, BufferedImage.TYPE_INT_RGB);
         Graphics2D g = image.createGraphics();
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
@@ -105,7 +136,11 @@ public class MapRenderer {
             g.drawRect(p[0] - 4, p[1] - 4, 8, 8);
         }
 
-        // новая сеть варианта
+        // новая сеть варианта; в сравнении способ прокладки не кодируется штрихом.
+        if (alternative != null) {
+            drawComparisonNetwork(g, t, variant, false);
+            drawComparisonNetwork(g, t, alternative, true);
+        } else {
         for (VariantResult.Segment s : variant.segments) {
             float w = (float) (1.8 + s.diameter / 150.0);
             BasicStroke stroke = s.special
@@ -131,6 +166,7 @@ public class MapRenderer {
             g.setColor(Color.WHITE);
             g.setStroke(new BasicStroke(1.4f));
             g.drawOval(p[0] - 5, p[1] - 5, 10, 10);
+        }
         }
 
         // точки подключения и источник
@@ -159,6 +195,31 @@ public class MapRenderer {
 
         g.dispose();
         return image;
+    }
+
+    private void drawComparisonNetwork(Graphics2D g, Transform t, VariantResult variant, boolean second) {
+        Color color = second ? COMPARISON_B : COMPARISON_A;
+        g.setColor(color);
+        g.setStroke(second
+                ? new BasicStroke(3.5f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_ROUND,
+                        1f, new float[]{13f, 8f}, 0f)
+                : new BasicStroke(7f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+        for (VariantResult.Segment segment : variant.segments) {
+            drawLine(g, t, segment.utmCoords.toArray(new Coordinate[0]));
+        }
+        for (VariantResult.Chamber chamber : variant.chambers) {
+            int[] p = t.px(chamber.utm);
+            if (second) {
+                g.setColor(Color.WHITE);
+                g.fillRect(p[0] - 4, p[1] - 4, 8, 8);
+                g.setColor(color);
+                g.setStroke(new BasicStroke(2f));
+                g.drawRect(p[0] - 4, p[1] - 4, 8, 8);
+            } else {
+                g.setColor(color);
+                g.fillOval(p[0] - 6, p[1] - 6, 12, 12);
+            }
+        }
     }
 
     private void drawScaleBar(Graphics2D g, Transform t, int widthPx, int heightPx) {

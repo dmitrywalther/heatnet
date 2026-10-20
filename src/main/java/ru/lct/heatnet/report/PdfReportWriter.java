@@ -20,11 +20,16 @@ import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * Пояснительная записка к расчёту: сводка вариантов, карта, разбивка
@@ -83,6 +88,8 @@ public class PdfReportWriter {
         try {
             summaryPage();
             MapRenderer renderer = new MapRenderer(input);
+            comparisonPages(variants, false, renderer);
+            if (depthVariants != null) comparisonPages(depthVariants, true, renderer);
             for (VariantResult v : variants) {
                 variantPages(v, renderer);
             }
@@ -201,6 +208,198 @@ public class PdfReportWriter {
         paragraph("Основной вариант предусматривает совместное подключение ОКС с общими "
                 + "магистралями. Альтернативный вариант включается при наличии содержательно "
                 + "отличающегося решения с другими точками присоединения к существующей сети.", 10, MUTED);
+        if (variants.size() == 1) {
+            paragraph("Базовый режим: доступен только один вариант; пары для сравнения нет.", 9, MUTED);
+        }
+        if (depthVariants != null && depthVariants.size() == 1) {
+            paragraph("Режим с глубиной: доступен только один вариант; пары для сравнения нет.", 9, MUTED);
+        }
+    }
+
+    private void comparisonPages(List<VariantResult> results, boolean depth, MapRenderer renderer)
+            throws IOException {
+        if (results.size() < 2) return;
+        List<VariantResult> ranked = new ArrayList<>(results);
+        // Не менять исходный порядок и не выводить номер из технического ID.
+        ranked.sort(Comparator.comparingInt(v -> v.rank > 0 ? v.rank : Integer.MAX_VALUE));
+        VariantResult a = ranked.get(0);
+        for (int i = 1; i < ranked.size(); i++) {
+            VariantResult b = ranked.get(i);
+            newPage();
+            title("Сравнение трасс: " + (depth ? "режим с глубиной" : "базовый режим"));
+            paragraph("A: " + variantLabel(a) + " · " + a.variantId, 10, MapRenderer.COMPARISON_A);
+            paragraph("B: " + variantLabel(b) + " · " + b.variantId, 10, MapRenderer.COMPARISON_B);
+            paragraph(a.rank > 0
+                    ? "A — первый по rank среди доступных вариантов этого режима. Δ = B − A."
+                    : "Ранжирование не задано; A и B взяты в сохранённом порядке. Δ = B − A.",
+                    9, MUTED);
+            y -= 7;
+
+            BufferedImage map = renderer.renderComparison(a, b, 1560, 690);
+            float mapH = CONTENT_W * 690f / 1560f;
+            cs.drawImage(LosslessFactory.createFromImage(doc, map), MARGIN, y - mapH, CONTENT_W, mapH);
+            cs.setStrokingColor(ROW_LINE);
+            cs.setLineWidth(0.8f);
+            cs.addRect(MARGIN, y - mapH, CONTENT_W, mapH);
+            cs.stroke();
+            y -= mapH + 14;
+            comparisonLegend();
+            paragraph("Совпадающие трассы видны обоими цветами; охват включает обе сети. "
+                    + "Штрих здесь обозначает B, а не спецпроход. Карта показывает XY, не глубину.",
+                    8, MUTED);
+            y -= 6;
+
+            Set<String> allIds = new LinkedHashSet<>();
+            for (InputModel.OksPoint point : input.oksPoints) allIds.add(typedId(point.id));
+            Set<String> missingA = typedIds(a.unconnectedOksIds);
+            Set<String> missingB = typedIds(b.unconnectedOksIds);
+            missingA.retainAll(allIds);
+            missingB.retainAll(allIds);
+            int connectedA = allIds.size() - missingA.size();
+            int connectedB = allIds.size() - missingB.size();
+            List<String[]> rows = new ArrayList<>();
+            rows.add(comparisonMetric("Итоговая стоимость, руб.", a.calculatedCost, b.calculatedCost, 0));
+            rows.add(comparisonMetric("Строительство, руб.", a.constructionCost, b.constructionCost, 0));
+            rows.add(comparisonMetric("Участки труб, руб.",
+                    a.segments.stream().mapToDouble(s -> s.cost).sum(),
+                    b.segments.stream().mapToDouble(s -> s.cost).sum(), 0));
+            rows.add(comparisonMetric("Штрафы, руб.", a.unconnectedPenalty, b.unconnectedPenalty, 0));
+            rows.add(comparisonMetric("Длина новой сети, м", a.newNetworkLength, b.newNetworkLength, 2));
+            rows.add(comparisonMetric("Показатель S", a.score, b.score, 4));
+            rows.add(new String[]{"Подключено ОКС", connectedA + " / " + allIds.size(),
+                    connectedB + " / " + allIds.size(), signed(connectedB - connectedA, 0)});
+            rows.add(comparisonMetric("Новые камеры, шт.", a.chambers.size(), b.chambers.size(), 0));
+            rows.add(comparisonMetric("Камеры, руб.", a.chamberConstructionCost, b.chamberConstructionCost, 0));
+            rows.add(comparisonMetric("Врезки в существ. камеры, шт.",
+                    a.existingChamberTieInCount, b.existingChamberTieInCount, 0));
+            rows.add(comparisonMetric("Врезки в существ. камеры, руб.",
+                    a.existingChamberTieInCost, b.existingChamberTieInCost, 0));
+            comparisonTable(rows);
+            paragraph("Строительство = трубы + новые камеры + врезки; итог = строительство + штрафы. "
+                    + "Δ рассчитана из показанных округлённых значений.", 8, MUTED);
+            y -= 6;
+
+            Set<String> restored = new LinkedHashSet<>(missingA);
+            restored.removeAll(missingB);
+            Set<String> lost = new LinkedHashSet<>(missingB);
+            lost.removeAll(missingA);
+            Set<String> stillMissing = new LinkedHashSet<>(missingA);
+            stillMissing.retainAll(missingB);
+            comparisonIdList("Появляются в B", restored);
+            comparisonIdList("Теряются в B", lost);
+            comparisonIdList("Не подключены в обоих", stillMissing);
+            paragraph("n: — числовой ID, s: — строковый ID. Сравниваются варианты одного набора. "
+                    + "Это не сценарий изменения препятствий и не доказательство глобального оптимума.",
+                    8, MUTED);
+        }
+    }
+
+    private void comparisonLegend() throws IOException {
+        float x = MARGIN;
+        cs.setStrokingColor(MapRenderer.COMPARISON_A);
+        cs.setLineWidth(2.5f);
+        cs.moveTo(x, y);
+        cs.lineTo(x + 22, y);
+        cs.stroke();
+        text(x + 28, y - 3, regular, 8, TEXT, "A · сплошная");
+        x += 125;
+        cs.setStrokingColor(MapRenderer.COMPARISON_B);
+        cs.setLineWidth(1.4f);
+        cs.setLineDashPattern(new float[]{4, 3}, 0);
+        cs.moveTo(x, y);
+        cs.lineTo(x + 22, y);
+        cs.stroke();
+        cs.setLineDashPattern(new float[]{}, 0);
+        text(x + 28, y - 3, regular, 8, TEXT, "B · штриховая");
+        text(MARGIN + 260, y - 3, regular, 8, MUTED, "Камеры: A — круг, B — квадрат");
+        y -= 17;
+    }
+
+    private void comparisonTable(List<String[]> rows) throws IOException {
+        float[] widths = {179, 110, 110, CONTENT_W - 399};
+        String[] headers = {"Показатель", "A", "B", "Δ B − A"};
+        drawTableHeader(headers, widths);
+        for (String[] row : rows) {
+            int lines = 1;
+            List<List<String>> cells = new ArrayList<>();
+            for (int i = 0; i < row.length; i++) {
+                List<String> cell = comparisonWrap(row[i], 8.5f, widths[i] - 10);
+                cells.add(cell);
+                lines = Math.max(lines, cell.size());
+            }
+            float height = Math.max(17, lines * 11 + 5);
+            if (y - height < BOTTOM) {
+                newPage();
+                drawTableHeader(headers, widths);
+            }
+            float x = MARGIN;
+            for (int i = 0; i < cells.size(); i++) {
+                float ty = y - 12;
+                for (String value : cells.get(i)) {
+                    float tx = i == 0 ? x + 4 : x + widths[i] - 6 - width(regular, 8.5f, value);
+                    text(tx, ty, regular, 8.5f, TEXT, value);
+                    ty -= 11;
+                }
+                x += widths[i];
+            }
+            cs.setStrokingColor(ROW_LINE);
+            cs.setLineWidth(0.5f);
+            cs.moveTo(MARGIN, y - height);
+            cs.lineTo(MARGIN + CONTENT_W, y - height);
+            cs.stroke();
+            y -= height;
+        }
+        y -= 10;
+    }
+
+    private void comparisonIdList(String label, Set<String> ids) throws IOException {
+        String message = label + ": " + (ids.isEmpty() ? "нет" : String.join(", ", ids));
+        for (String line : comparisonWrap(message, 9, CONTENT_W)) {
+            ensureSpace(13);
+            text(MARGIN, y, regular, 9, TEXT, line);
+            y -= 12.5f;
+        }
+    }
+
+    /** Не обрезает ни длинные точные ID, ни большие денежные значения. */
+    private List<String> comparisonWrap(String value, float size, float maxWidth) throws IOException {
+        List<String> result = new ArrayList<>();
+        for (String line : wrap(value, regular, size, maxWidth)) {
+            String remaining = line;
+            while (width(regular, size, remaining) > maxWidth) {
+                int cut = remaining.offsetByCodePoints(0, remaining.codePointCount(0, remaining.length()) / 2);
+                while (cut < remaining.length()
+                        && width(regular, size, remaining.substring(0, cut + 1)) <= maxWidth) cut++;
+                while (cut > 1 && width(regular, size, remaining.substring(0, cut)) > maxWidth) cut--;
+                result.add(remaining.substring(0, cut));
+                remaining = remaining.substring(cut);
+            }
+            result.add(remaining);
+        }
+        return result;
+    }
+
+    private static String[] comparisonMetric(String label, double a, double b, int digits) {
+        BigDecimal shownA = BigDecimal.valueOf(a).setScale(digits, RoundingMode.HALF_UP);
+        BigDecimal shownB = BigDecimal.valueOf(b).setScale(digits, RoundingMode.HALF_UP);
+        return new String[]{label, fmt(shownA.doubleValue(), digits), fmt(shownB.doubleValue(), digits),
+                signed(shownB.subtract(shownA).doubleValue(), digits)};
+    }
+
+    private static String signed(double value, int digits) {
+        return (value > 0 ? "+" : "") + fmt(value == 0 ? 0 : value, digits);
+    }
+
+    private static Set<String> typedIds(List<Object> ids) {
+        Set<String> result = new LinkedHashSet<>();
+        for (Object id : ids) result.add(typedId(id));
+        return result;
+    }
+
+    private static String typedId(Object id) {
+        return id instanceof Number
+                ? "n:" + new BigDecimal(id.toString()).stripTrailingZeros().toPlainString()
+                : "s:" + id;
     }
 
     private void variantPages(VariantResult v, MapRenderer renderer) throws IOException {
