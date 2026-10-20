@@ -1,0 +1,9 @@
+{
+  "restrictions": {
+    "tram_tracks": {
+      "vertical": {
+        "min_top_depth": 4.2
+      }
+    }
+  }
+}

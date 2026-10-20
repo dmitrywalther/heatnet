@@ -1,0 +1,436 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 101,
+        "object_type": "restriction",
+        "restriction_type": "oks"
+      },
+      "geometry": {
+        "type": "MultiPolygon",
+        "coordinates": [
+          [
+            [
+              [
+                37.41021127427,
+                55.66615225876
+              ],
+              [
+                37.41059265888,
+                55.66615719864
+              ],
+              [
+                37.41058392018,
+                55.66637276606
+              ],
+              [
+                37.41020253347,
+                55.66636782614
+              ],
+              [
+                37.41021127427,
+                55.66615225876
+              ]
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 1,
+        "object_type": "oks_connection_point",
+        "flow_tph": 8
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.41039905332,
+          55.66622658465
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 102,
+        "object_type": "restriction",
+        "restriction_type": "oks"
+      },
+      "geometry": {
+        "type": "MultiPolygon",
+        "coordinates": [
+          [
+            [
+              [
+                37.41132364638,
+                55.66616666342
+              ],
+              [
+                37.41170503134,
+                55.66617159984
+              ],
+              [
+                37.41169629874,
+                55.66638716738
+              ],
+              [
+                37.41131491169,
+                55.66638223092
+              ],
+              [
+                37.41132364638,
+                55.66616666342
+              ]
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 2,
+        "object_type": "oks_connection_point",
+        "flow_tph": 12
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.41151142764,
+          55.66624098762
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 103,
+        "object_type": "restriction",
+        "restriction_type": "oks"
+      },
+      "geometry": {
+        "type": "MultiPolygon",
+        "coordinates": [
+          [
+            [
+              [
+                37.4124360195,
+                55.666181058
+              ],
+              [
+                37.4128174048,
+                55.66618599097
+              ],
+              [
+                37.41280867832,
+                55.66640155862
+              ],
+              [
+                37.41242729092,
+                55.66639662562
+              ],
+              [
+                37.4124360195,
+                55.666181058
+              ]
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 3,
+        "object_type": "oks_connection_point",
+        "flow_tph": 10
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.41262380297,
+          55.66625538051
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 104,
+        "object_type": "restriction",
+        "restriction_type": "oks"
+      },
+      "geometry": {
+        "type": "MultiPolygon",
+        "coordinates": [
+          [
+            [
+              [
+                37.41354839363,
+                55.66619544251
+              ],
+              [
+                37.41392977927,
+                55.66620037202
+              ],
+              [
+                37.4139210589,
+                55.66641593979
+              ],
+              [
+                37.41353967116,
+                55.66641101024
+              ],
+              [
+                37.41354839363,
+                55.66619544251
+              ]
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 4,
+        "object_type": "oks_connection_point",
+        "flow_tph": 14
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.41373617931,
+          55.66626976333
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 201,
+        "object_type": "heat_network",
+        "diameter": 400
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            37.40832987687,
+            55.66549880395
+          ],
+          [
+            37.40960113702,
+            55.66551528495
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 202,
+        "object_type": "heat_network",
+        "diameter": 400
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            37.40960113702,
+            55.66551528495
+          ],
+          [
+            37.4146861908,
+            55.66558107735
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 203,
+        "object_type": "heat_network",
+        "diameter": 400
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            37.4146861908,
+            55.66558107735
+          ],
+          [
+            37.41595745753,
+            55.66559749254
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 301,
+        "object_type": "heat_chamber"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.40960113702,
+          55.66551528495
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 302,
+        "object_type": "heat_chamber"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.4146861908,
+          55.66558107735
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 401,
+        "object_type": "source",
+        "name": "Синтетический источник: cable/tram/YAML"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.40832987687,
+          55.66549880395
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 901,
+        "object_type": "restriction",
+        "restriction_type": "power_cable"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            37.40069941275,
+            55.66547149699
+          ],
+          [
+            37.42294655779,
+            55.66575939708
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 902,
+        "object_type": "restriction",
+        "restriction_type": "gas_pipeline"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            37.40069721454,
+            55.66552538859
+          ],
+          [
+            37.42294439014,
+            55.66581328926
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 903,
+        "object_type": "restriction",
+        "restriction_type": "tram_tracks"
+      },
+      "geometry": {
+        "type": "MultiPolygon",
+        "coordinates": [
+          [
+            [
+              [
+                37.40069355085,
+                55.66561520793
+              ],
+              [
+                37.42294077736,
+                55.66590310956
+              ],
+              [
+                37.42293860968,
+                55.66595700174
+              ],
+              [
+                37.40069135263,
+                55.66566909953
+              ],
+              [
+                37.40069355085,
+                55.66561520793
+              ]
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "scenario-prohibited-1",
+        "object_type": "restriction",
+        "restriction_type": "prohibited_site",
+        "name": "Новая запретная зона"
+      },
+      "geometry": {
+        "type": "MultiPolygon",
+        "coordinates": [
+          [
+            [
+              [
+                37.41196656395,
+                55.66599525049
+              ],
+              [
+                37.41218903759,
+                55.66599812904
+              ],
+              [
+                37.41218249019,
+                55.66615980474
+              ],
+              [
+                37.41196001564,
+                55.66615692617
+              ],
+              [
+                37.41196656395,
+                55.66599525049
+              ]
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

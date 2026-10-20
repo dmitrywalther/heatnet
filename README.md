@@ -29,6 +29,16 @@ GeoJSON с существующей тепловой сетью, камерам�
 ДУ и фактическое объяснение маршрута. Выбор ОКС связан с картой и профилем;
 сумма стоимостей участков пути отделена от цены индивидуального подключения.
 
+Карточку и профиль можно получить без веб-интерфейса: отдельный
+[PDF-паспорт ОКС](docs/connection-card.md#паспорт-подключения-в-pdf) содержит
+схему пути, ввод, таблицы участков и объяснения; глубинный вариант добавляет
+продольный профиль. Выгрузка доступна через API, CLI и кнопку интерфейса.
+Она читает сохранённый результат без повторной трассировки.
+
+Для анализа изменений есть [сравнение двух сохранённых расчётов](docs/scenario-comparison.md)
+через API и CLI: стоимость, подключения, изменённые трассы и отдельный PDF/JSON.
+В `samples/scenario-comparison/` — пример добавления запретной зоны.
+
 ## Стек (по требованиям ТЗ, п. 3.2)
 
 | Компонент | Версия |
@@ -79,6 +89,10 @@ curl -o result-depth.geojson http://localhost:8080/api/v1/tracing/jobs/<uuid>/re
 # 5. Пояснительная записка (PDF): карты вариантов, разбивка стоимости,
 #    таблицы участков и камер, методика расчёта
 curl -o report.pdf http://localhost:8080/api/v1/tracing/jobs/<uuid>/report
+
+# 6. Паспорт выбранного ОКС с профилем (n:10 — числовой ID 10)
+#    Точные oks_key предварительно получите из /connection?variant_id=d1.
+curl -o passport.pdf "http://localhost:8080/api/v1/tracing/jobs/<uuid>/connection.pdf?variant_id=d1&oks_key=n%3A10"
 ```
 
 Spring принимает GeoJSON до 3 GiB, YAML до 1 MiB, весь multipart-запрос до 3100 MiB;
@@ -140,6 +154,34 @@ java -jar target/heatnet-1.0.0.jar --spring.profiles.active=cli \
 
 Для собственного справочника добавьте `--rules=config/rules-example.yml`;
 без этого параметра применяются встроенные правила.
+
+Для отдельного PDF-паспорта по **уже сохранённому** результату:
+
+```bash
+java -jar target/heatnet-1.0.0.jar --spring.profiles.active=cli --export-connection \
+     --input=dataset.geojson --result=result-depth.geojson \
+     --variant=d1 --oks-key=n:10 --output=passport.pdf
+```
+
+Нужны исходный GeoJSON и результат одного расчёта; при использовании
+переопределений передайте тот же `--rules=rules.yml`. Для паспорта без глубин
+укажите `--result=result.geojson --variant=v1`. Сервер и БД не требуются;
+новый расчёт не выполняется. Ключ `n:10` обозначает числовой ID, `s:10` —
+строковый. Подробнее — [экспорт паспорта](docs/connection-card.md).
+
+Два готовых расчёта можно сравнить без сервера и БД:
+
+```bash
+java -jar target/heatnet-1.0.0.jar --spring.profiles.active=cli --compare-results \
+     --before-input=before.geojson --before-result=before-result.geojson --before-variant=v1 \
+     --after-input=after.geojson --after-result=after-result.geojson --after-variant=v1 \
+     --output=comparison.json
+```
+
+Рядом создаётся `comparison.pdf`. Для каждого расчёта отдельно передайте его
+YAML через `--before-rules` / `--after-rules`, если использовались переопределения.
+Для глубинного сравнения нужны два depth-результата и варианты `d1`/`d3`.
+API и воспроизводимый пример — в [инструкции сравнения](docs/scenario-comparison.md).
 
 CLI возвращает код `0`, если есть допустимый базовый результат, `3` — если
 все рассчитанные базовые варианты исключены, `2` — если не указаны вход/выход.
