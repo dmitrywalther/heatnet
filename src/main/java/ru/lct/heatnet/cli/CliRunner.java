@@ -41,6 +41,7 @@ public class CliRunner implements ApplicationRunner {
 
     /** Возвращает код завершения; run передаёт его процессу. */
     public int execute(ApplicationArguments args) throws Exception {
+        if (args.containsOption("export-connection")) return ExportConnectionRunner.execute(args);
         List<String> input = args.getOptionValues("input");
         List<String> output = args.getOptionValues("output");
         if (input == null || input.isEmpty() || output == null || output.isEmpty()) {

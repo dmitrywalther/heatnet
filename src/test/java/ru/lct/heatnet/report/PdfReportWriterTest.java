@@ -52,6 +52,8 @@ class PdfReportWriterTest {
             assertFalse(text.contains("Раздельный вариант приводится"),
                     "the report must not promise an independent variant absent from its result");
             assertTrue(text.contains("Итоговый показатель"));
+            assertTrue(text.contains("Паспорт подключения ОКС"),
+                    "The main report must explain how experts can obtain the offline card/profile");
         }
     }
 

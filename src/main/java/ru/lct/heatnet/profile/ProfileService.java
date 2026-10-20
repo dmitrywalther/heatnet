@@ -1,24 +1,17 @@
 package ru.lct.heatnet.profile;
 
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.core.JsonParser;
-import com.fasterxml.jackson.core.util.JsonParserDelegate;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
-import ru.lct.heatnet.geo.GeoJsonReader;
-import ru.lct.heatnet.geo.Projection;
 import ru.lct.heatnet.job.JobEntity;
 import ru.lct.heatnet.job.JobService;
-import ru.lct.heatnet.model.InputModel;
 import ru.lct.heatnet.refdata.RestrictionRules;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.ByteArrayOutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -32,9 +25,6 @@ import java.util.Map;
 public class ProfileService {
     private final JobService jobs;
     private final RestrictionRules serverRules;
-    private final ObjectMapper mapper = new ObjectMapper()
-            .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
-            .setNodeFactory(JsonNodeFactory.withExactBigDecimals(true));
     // Compact graph/footprints only. No InputModel, input text or complete profiles retained.
     private final LinkedHashMap<String, ProfileScene> cache = new LinkedHashMap<>(4,0.75f,true);
     private static final int MAX_CACHED_COORDINATES = 150_000;
@@ -63,6 +53,26 @@ public class ProfileService {
     }
 
     public Map<String,Object> getConnection(String id,String variant,String oksKey) throws IOException {
+        try {
+            ProfileScene scene=connectionScene(id,variant);
+            return oksKey==null?scene.connections():scene.connection(oksKey);
+        } catch(IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,e.getMessage(),e);
+        }
+    }
+
+    public byte[] getConnectionPdf(String id,String variant,String oksKey) throws IOException {
+        try {
+            ProfileScene scene=connectionScene(id,variant);
+            ByteArrayOutputStream out=new ByteArrayOutputStream();
+            ConnectionPassport.write(out,scene,variant,oksKey);
+            return out.toByteArray();
+        } catch(IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,e.getMessage(),e);
+        }
+    }
+
+    private ProfileScene connectionScene(String id,String variant) throws IOException {
         JobEntity job=jobs.get(id);
         if(job==null) throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Задача не найдена");
         if(variant==null||!variant.matches("[vd][0-9]+"))
@@ -75,12 +85,7 @@ public class ProfileService {
         if(!Files.isRegularFile(input)||!Files.isRegularFile(result))
             throw new ResponseStatusException(HttpStatus.CONFLICT,"Файлы результата подключения недоступны");
         Path rules=input.resolveSibling(job.getId()+"-rules.yml");
-        try {
-            ProfileScene scene=load(input,result,rules,variant,depthMode);
-            return oksKey==null?scene.connections():scene.connection(oksKey);
-        } catch(IllegalArgumentException e) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT,e.getMessage(),e);
-        }
+        return load(input,result,rules,variant,depthMode);
     }
 
     private synchronized ProfileScene load(Path input,Path depth,Path rules,String variant,boolean depthMode) throws IOException {
@@ -89,14 +94,7 @@ public class ProfileService {
         if(existing!=null) return existing;
         RestrictionRules effective=serverRules;
         if(Files.isRegularFile(rules)) try(InputStream in=Files.newInputStream(rules)) { effective=serverRules.mergeYaml(in); }
-        InputModel model;
-        try(InputStream in=Files.newInputStream(input)) { model=new GeoJsonReader(new Projection()).read(in); }
-        ProfileScene scene;
-        // Match GeoJsonReader: isNaN probing must not round valid 1e400 numeric IDs through double.
-        try(InputStream in=Files.newInputStream(depth);
-            JsonParser parser=new JsonParserDelegate(mapper.getFactory().createParser(in)) {
-                @Override public boolean isNaN() { return false; }
-            }) { scene=new ProfileScene(model,mapper.readTree(parser),effective,variant,depthMode); }
+        ProfileScene scene=SavedSceneReader.read(input,depth,effective,variant,depthMode);
         int count=scene.coordinateCount();
         if(count<=MAX_CACHED_COORDINATES) {
             Iterator<Map.Entry<String,ProfileScene>> iterator=cache.entrySet().iterator();
