@@ -30,6 +30,9 @@ import java.util.Set;
  */
 public class NetworkAssembler {
 
+    /** Один допуск для ненулевого фрагмента и совпадения технических узлов. */
+    private static final double FRAGMENT_EPS_M = 1e-6;
+
     private final ObstacleIndex obstacles;
 
     public NetworkAssembler(ObstacleIndex obstacles) {
@@ -125,7 +128,7 @@ public class NetworkAssembler {
             }
             double edgeLength = arc;
             List<GeoUtil.SpecialInterval> merged = GeoUtil.mergeIntervals(intervals, edgeLength);
-            edgeIntervals.put(edge, new EdgeIntervals(edgeLength, merged, valid));
+            edgeIntervals.put(edge, new EdgeIntervals(edgeLength, merged, rawIntervals, valid));
             if (depthMode) {
                 depthWindows.put(edge, verticalWindows(rawIntervals, edge.grade.getHeightM(), edgeLength));
             }
@@ -146,11 +149,14 @@ public class NetworkAssembler {
             boolean valid = data.valid;
             DepthProfile profile = profiles.get(edge);
 
-            // точки деления: границы спецучастков + изломы профиля глубины
+            // Каждый отдельный проход и общий фрагмент пересечений требуют
+            // разреза даже при одинаковом Kспец (раздел 4 техприложения).
+            // Слитые интервалы используются только для маркировки и цены:
+            // они могут скрывать границы перекрытий и стык на изломе пути.
             java.util.TreeSet<Double> cuts = new java.util.TreeSet<>();
             cuts.add(0.0);
             cuts.add(edgeLength);
-            for (GeoUtil.SpecialInterval si : merged) {
+            for (GeoUtil.SpecialInterval si : data.crossings) {
                 cuts.add(Math.max(0, si.from));
                 cuts.add(Math.min(edgeLength, si.to));
             }
@@ -163,7 +169,7 @@ public class NetworkAssembler {
             List<Double> cutList = new ArrayList<>(cuts);
             int fragCount = 0;
             for (int f = 0; f + 1 < cutList.size(); f++) {
-                if (cutList.get(f + 1) - cutList.get(f) > 1e-6) {
+                if (cutList.get(f + 1) - cutList.get(f) > FRAGMENT_EPS_M) {
                     fragCount++;
                 }
             }
@@ -171,7 +177,7 @@ public class NetworkAssembler {
             for (int f = 0; f + 1 < cutList.size(); f++) {
                 double fromArc = cutList.get(f), toArc = cutList.get(f + 1);
                 double fragLen = toArc - fromArc;
-                if (fragLen <= 1e-6) {
+                if (fragLen <= FRAGMENT_EPS_M) {
                     continue;
                 }
                 double mid = (fromArc + toArc) / 2;
@@ -191,6 +197,11 @@ public class NetworkAssembler {
                 seg.flowTph = round2(edge.flowTph);
                 seg.diameter = edge.grade.getDu();
                 seg.lengthM = round2(fragLen);
+                // Близкие, но разные границы могут дать участок короче 5 мм.
+                // Не превращаем его в нулевое ребро; обычная точность прежняя.
+                if (seg.lengthM == 0) {
+                    seg.lengthM = Math.round(fragLen * 1e6) / 1e6;
+                }
                 seg.special = special;
                 seg.kSpec = k;
                 if (profile != null) {
@@ -294,11 +305,14 @@ public class NetworkAssembler {
     private static final class EdgeIntervals {
         final double length;
         final List<GeoUtil.SpecialInterval> merged;
+        final List<GeoUtil.SpecialInterval> crossings;
         final boolean valid;
 
-        EdgeIntervals(double length, List<GeoUtil.SpecialInterval> merged, boolean valid) {
+        EdgeIntervals(double length, List<GeoUtil.SpecialInterval> merged,
+                      List<GeoUtil.SpecialInterval> crossings, boolean valid) {
             this.length = length;
             this.merged = merged;
+            this.crossings = crossings;
             this.valid = valid;
         }
     }
@@ -363,7 +377,7 @@ public class NetworkAssembler {
     /** Технический узел на границе спецучастка; совпадающие координаты переиспользуются. */
     private Object techNodeId(VariantResult result, Coordinate at, String variantId, OutputIds outputIds) {
         for (VariantResult.TechNode t : result.techNodes) {
-            if (t.utm.distance(at) < 1e-3) {
+            if (t.utm.distance(at) <= FRAGMENT_EPS_M) {
                 return t.id;
             }
         }

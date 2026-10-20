@@ -11,7 +11,9 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Потоковая выгрузка результата в GeoJSON (FeatureCollection, WGS 84)
@@ -50,6 +52,7 @@ public class GeoJsonWriter {
     }
 
     private void writeVariant(JsonGenerator gen, VariantResult v) throws IOException {
+        Map<Object, Coordinate> preciseNodes = preciseNodes(v);
         for (VariantResult.Segment s : v.segments) {
             gen.writeStartObject();
             gen.writeStringField("type", "Feature");
@@ -81,8 +84,12 @@ public class GeoJsonWriter {
             gen.writeArrayFieldStart("coordinates");
             List<Coordinate> coords = s.utmCoords;
             for (int i = 0; i < coords.size(); i++) {
+                Coordinate precise = i == 0 ? preciseNodes.get(s.startNodeId)
+                        : i == coords.size() - 1 ? preciseNodes.get(s.endNodeId) : null;
                 Coordinate wgs;
-                if (i == 0 && s.startWgs != null) {
+                if (precise != null) {
+                    wgs = precise;
+                } else if (i == 0 && s.startWgs != null) {
                     wgs = s.startWgs;
                 } else if (i == coords.size() - 1 && s.endWgs != null) {
                     wgs = s.endWgs;
@@ -91,8 +98,8 @@ public class GeoJsonWriter {
                     wgs = projection.utmToWgs(c.x, c.y);
                 }
                 gen.writeStartArray();
-                gen.writeNumber(round9(wgs.x));
-                gen.writeNumber(round9(wgs.y));
+                gen.writeNumber(precise != null ? wgs.x : round9(wgs.x));
+                gen.writeNumber(precise != null ? wgs.y : round9(wgs.y));
                 gen.writeEndArray();
             }
             gen.writeEndArray();
@@ -110,7 +117,7 @@ public class GeoJsonWriter {
             gen.writeNumberField("diameter", c.diameter);
             writeCost(gen, "cost", c.cost);
             gen.writeEndObject();
-            writePointGeometry(gen, c.utm);
+            writePointGeometry(gen, c.utm, preciseNodes.get(c.id));
             gen.writeEndObject();
         }
 
@@ -122,7 +129,7 @@ public class GeoJsonWriter {
             gen.writeStringField("object_type", "technical_node");
             gen.writeStringField("variant_id", v.variantId);
             gen.writeEndObject();
-            writePointGeometry(gen, t.utm);
+            writePointGeometry(gen, t.utm, preciseNodes.get(t.id));
             gen.writeEndObject();
         }
 
@@ -152,13 +159,43 @@ public class GeoJsonWriter {
         gen.writeEndObject();
     }
 
-    private void writePointGeometry(JsonGenerator gen, Coordinate utm) throws IOException {
-        Coordinate wgs = projection.utmToWgs(utm.x, utm.y);
+    /**
+     * Только микроскопические участки могут исчезнуть при округлении WGS до
+     * девятого знака. Их узлы получают одну точную координату по ID для всех
+     * примыканий и точечных объектов; обычный экспорт сохраняет прежний формат.
+     */
+    private Map<Object, Coordinate> preciseNodes(VariantResult v) {
+        Map<Object, Coordinate> result = new HashMap<>();
+        for (VariantResult.Segment s : v.segments) {
+            if (s.lengthM >= 0.001 || s.utmCoords.size() < 2) continue;
+            Coordinate first = s.utmCoords.get(0), last = s.utmCoords.get(s.utmCoords.size() - 1);
+            Coordinate a = s.startWgs != null ? s.startWgs : projection.utmToWgs(first.x, first.y);
+            Coordinate b = s.endWgs != null ? s.endWgs : projection.utmToWgs(last.x, last.y);
+            if (round9(a.x) == round9(b.x) && round9(a.y) == round9(b.y)) {
+                result.putIfAbsent(s.startNodeId, a);
+                result.putIfAbsent(s.endNodeId, b);
+            }
+        }
+        if (!result.isEmpty()) {
+            // Геометрия узла — единый источник координат, включая возможную
+            // численную разницу соседних интерполяций внутри 1 мкм.
+            for (VariantResult.TechNode n : v.techNodes) {
+                if (result.containsKey(n.id)) result.put(n.id, projection.utmToWgs(n.utm.x, n.utm.y));
+            }
+            for (VariantResult.Chamber n : v.chambers) {
+                if (result.containsKey(n.id)) result.put(n.id, projection.utmToWgs(n.utm.x, n.utm.y));
+            }
+        }
+        return result;
+    }
+
+    private void writePointGeometry(JsonGenerator gen, Coordinate utm, Coordinate precise) throws IOException {
+        Coordinate wgs = precise != null ? precise : projection.utmToWgs(utm.x, utm.y);
         gen.writeObjectFieldStart("geometry");
         gen.writeStringField("type", "Point");
         gen.writeArrayFieldStart("coordinates");
-        gen.writeNumber(round9(wgs.x));
-        gen.writeNumber(round9(wgs.y));
+        gen.writeNumber(precise != null ? wgs.x : round9(wgs.x));
+        gen.writeNumber(precise != null ? wgs.y : round9(wgs.y));
         gen.writeEndArray();
         gen.writeEndObject();
     }
