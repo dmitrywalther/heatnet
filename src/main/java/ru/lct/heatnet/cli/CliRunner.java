@@ -41,6 +41,11 @@ public class CliRunner implements ApplicationRunner {
 
     /** Возвращает код завершения; run передаёт его процессу. */
     public int execute(ApplicationArguments args) throws Exception {
+        if (args.containsOption("export-connection") && args.containsOption("compare-results")) {
+            log.error("Режимы --export-connection и --compare-results взаимоисключающие");
+            return 2;
+        }
+        if (args.containsOption("compare-results")) return CompareResultsRunner.execute(args);
         if (args.containsOption("export-connection")) return ExportConnectionRunner.execute(args);
         List<String> input = args.getOptionValues("input");
         List<String> output = args.getOptionValues("output");
