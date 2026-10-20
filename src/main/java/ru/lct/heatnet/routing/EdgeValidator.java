@@ -1,5 +1,6 @@
 package ru.lct.heatnet.routing;
 
+import org.locationtech.jts.algorithm.Distance;
 import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.Envelope;
 import org.locationtech.jts.geom.Geometry;
@@ -493,74 +494,114 @@ public class EdgeValidator {
     private boolean checkPolygonalCrossing(LineString seg, Coordinate a, Coordinate b,
                                            SpecialObstacle s, List<SpecialInterval> intervals,
                                            Coordinate sourceConnectionAt) {
+        Geometry boundary = s.core.getBoundary();
+        Geometry crossings = seg.intersection(boundary);
+        // Движение вдоль границы не является сквозным пересечением полигона
+        // и не снимает горизонтальный отступ даже при min_angle = 0.
+        if (!crossings.isEmpty() && crossings.getDimension() > 0) {
+            return false;
+        }
+        List<double[]> corePasses = polygonCorePasses(seg, a, b, s, sourceConnectionAt);
+        if (corePasses == null || corePasses.isEmpty()) return false;
         // Угол пересечения в точках входа относительно границы полигона
         if (s.minAngleDeg != null) {
-            Geometry boundary = s.core.getBoundary();
-            Geometry crossings = seg.intersection(boundary);
             for (Coordinate p : crossings.getCoordinates()) {
-                double[] dir = GeoUtil.boundaryDirectionAt(boundary, p);
-                if (dir == null) {
-                    continue;
+                double position = posOnSegment(a, b, p);
+                boolean internalContact = false;
+                for (double[] pass : corePasses) {
+                    if (position > pass[0] + COORD_EPS && position < pass[1] - COORD_EPS) {
+                        internalContact = true;
+                        break;
+                    }
                 }
-                double angle = GeoUtil.acuteAngleDeg(dir[0], dir[1], b.x - a.x, b.y - a.y);
-                if (angle < s.minAngleDeg - ANGLE_TOLERANCE_DEG) {
+                // Касание угла отверстия из материала дороги не является
+                // новым входом/выходом и не создаёт дополнительного угла.
+                if (internalContact) continue;
+                if (!polygonBoundaryAngleAllowed(boundary, p, b.x - a.x, b.y - a.y, s.minAngleDeg)) {
                     return false;
                 }
             }
         }
-        if (sourceConnectionAt != null) {
-            // Единственный односторонний допуск — у исходной камеры. На другом
-            // конце каждого прямого участка должен полностью поместиться выход
-            // из полигона и margin вдоль трассы (не евклидов буфер полигона).
-            double length = seg.getLength();
-            boolean sourceAtStart = sourceConnectionAt.distance(a) <= COORD_EPS;
-            Geometry inside = seg.intersection(s.core);
-            boolean found = false;
-            for (int i = 0; i < inside.getNumGeometries(); i++) {
-                Geometry part = inside.getGeometryN(i);
-                if (part.getDimension() < 1) {
-                    // Камера ровно на границе с выходом наружу: внутренняя
-                    // длина нулевая, наружные 3 м прямого прохода сохраняются.
-                    if (!part.isEmpty() && part.distance(GeoUtil.GF.createPoint(sourceConnectionAt)) <= COORD_EPS) {
-                        if (length < s.marginM - COORD_EPS) return false;
-                        intervals.add(new SpecialInterval(sourceAtStart ? 0 : length - s.marginM,
-                                sourceAtStart ? Math.min(length, s.marginM) : length, s.kSpec, s));
-                        found = true;
-                    }
-                    continue;
-                }
-                Coordinate[] cs = part.getCoordinates();
-                double t0 = posOnSegment(a, b, cs[0]);
-                double t1 = posOnSegment(a, b, cs[cs.length - 1]);
-                double from = Math.min(t0, t1), to = Math.max(t0, t1);
-                // При близком отверстии соседние окна могут перекрываться:
-                // их запас также не продолжается за подтверждённую камеру.
-                double start = sourceAtStart ? Math.max(0, from - s.marginM) : from - s.marginM;
-                double end = sourceAtStart ? to + s.marginM : Math.min(length, to + s.marginM);
-                if (start < -COORD_EPS || end > length + COORD_EPS) return false;
-                intervals.add(new SpecialInterval(Math.max(0, start), Math.min(length, end), s.kSpec, s));
-                found = true;
-            }
-            return found;
-        }
         // Каждое пересечение ядра расширяется на margin вдоль трассы.
         // Сохраняем отдельные raw-окна для глубины; для цены они объединяются.
-        // Касание ядра в точке сохраняет прежнюю проверку угла и получает
-        // симметричный запас относительно этой точки.
-        Geometry inside = seg.intersection(s.core);
         double length = seg.getLength();
-        for (int i = 0; i < inside.getNumGeometries(); i++) {
-            Geometry part = inside.getGeometryN(i);
-            if (part.isEmpty()) continue;
-            Coordinate[] cs = part.getCoordinates();
-            double t0 = posOnSegment(a, b, cs[0]);
-            double t1 = posOnSegment(a, b, cs[cs.length - 1]);
-            double from = Math.min(t0, t1) - s.marginM;
-            double to = Math.max(t0, t1) + s.marginM;
+        boolean sourceAtStart = sourceConnectionAt != null && sourceConnectionAt.distance(a) <= COORD_EPS;
+        for (double[] pass : corePasses) {
+            double from = pass[0] - s.marginM, to = pass[1] + s.marginM;
+            if (sourceConnectionAt != null) {
+                // Единственный односторонний допуск — у исходной камеры,
+                // включая её положение ровно на границе. При близком отверстии
+                // запас соседнего окна также не продолжается за эту камеру.
+                if (sourceAtStart) from = Math.max(0, from);
+                else to = Math.min(length, to);
+            }
             if (from < -COORD_EPS || to > length + COORD_EPS) return false;
             intervals.add(new SpecialInterval(Math.max(0, from), Math.min(length, to), s.kSpec, s));
         }
         return true;
+    }
+
+    /**
+     * Непрерывные проходы по ядру. JTS может разделить линию в точке касания
+     * угла отверстия; соединяем только реально соприкасающиеся интервалы,
+     * без численного расширения через положительный зазор.
+     */
+    private List<double[]> polygonCorePasses(LineString seg, Coordinate a, Coordinate b,
+                                             SpecialObstacle s, Coordinate sourceConnectionAt) {
+        Geometry inside = seg.intersection(s.core);
+        List<double[]> passes = new ArrayList<>();
+        for (int i = 0; i < inside.getNumGeometries(); i++) {
+            Geometry part = inside.getGeometryN(i);
+            if (part.isEmpty()) continue;
+            Coordinate[] cs = part.getCoordinates();
+            // Изолированное касание снаружи не снимает горизонтальный отступ.
+            // Единственное исключение — подтверждённая исходная камера.
+            if (part.getDimension() < 1 && (sourceConnectionAt == null
+                    || cs[0].distance(sourceConnectionAt) > COORD_EPS)) return null;
+            double t0 = posOnSegment(a, b, cs[0]);
+            double t1 = posOnSegment(a, b, cs[cs.length - 1]);
+            passes.add(new double[]{Math.min(t0, t1), Math.max(t0, t1)});
+        }
+        if (passes.size() < 2) return passes;
+        passes.sort(java.util.Comparator.comparingDouble(pass -> pass[0]));
+        int last = 0;
+        for (int i = 1; i < passes.size(); i++) {
+            double[] previous = passes.get(last), next = passes.get(i);
+            if (next[0] <= previous[1]) previous[1] = Math.max(previous[1], next[1]);
+            else passes.set(++last, next);
+        }
+        passes.subList(last + 1, passes.size()).clear();
+        return passes;
+    }
+
+    /**
+     * В вершине полигона проверяем оба примыкающих направления. Выбор только
+     * одного ближайшего сегмента делает допуск зависимым от начала и обхода
+     * кольца. Консервативное правило сохраняет тот же минимальный угол и допуск.
+     */
+    private boolean polygonBoundaryAngleAllowed(Geometry boundary, Coordinate point,
+                                                double dx, double dy, double minimum) {
+        boolean matched = false;
+        for (int part = 0; part < boundary.getNumGeometries(); part++) {
+            Geometry component = boundary.getGeometryN(part);
+            if (!(component instanceof LineString)) continue;
+            LineString ring = (LineString) component;
+            for (int i = 0; i + 1 < ring.getNumPoints(); i++) {
+                Coordinate from = ring.getCoordinateN(i), to = ring.getCoordinateN(i + 1);
+                if (from.equals2D(to)
+                        || point.x < Math.min(from.x, to.x) - COORD_EPS
+                        || point.x > Math.max(from.x, to.x) + COORD_EPS
+                        || point.y < Math.min(from.y, to.y) - COORD_EPS
+                        || point.y > Math.max(from.y, to.y) + COORD_EPS
+                        || Distance.pointToSegment(point, from, to) > COORD_EPS) {
+                    continue;
+                }
+                matched = true;
+                if (GeoUtil.acuteAngleDeg(to.x - from.x, to.y - from.y, dx, dy)
+                        < minimum - ANGLE_TOLERANCE_DEG) return false;
+            }
+        }
+        return matched;
     }
 
     private boolean checkLinearCrossing(LineString seg, Coordinate a, Coordinate b, double length,

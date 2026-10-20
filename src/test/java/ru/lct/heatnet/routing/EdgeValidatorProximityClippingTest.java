@@ -143,16 +143,16 @@ class EdgeValidatorProximityClippingTest {
     }
 
     @Test
-    void coreBoundaryOverlapRetainsCurrentAngleDependentBehavior() throws Exception {
+    void coreBoundaryOverlapCannotWaiveClearanceEvenWithoutAngleRule() throws Exception {
         Coordinate a = new Coordinate(-10, 0);
         Coordinate b = new Coordinate(20, 0);
         Fixture unrestricted = rectangle(null);
         Geometry contact = GeoUtil.segment(a, b).intersection(unrestricted.obstacle.core);
         assertEquals(1, contact.getDimension());
         assertEquals(10.0, contact.getLength(), 1e-9);
-        // Characterization only: an unspecified angle currently permits this contact.
-        assertIntervals(unrestricted.check(a, b), 30, new double[][]{{9, 21}});
-        assertIntervals(unrestricted.check(b, a), 30, new double[][]{{9, 21}});
+        // A boundary overlap is not a through crossing, irrespective of angle settings.
+        assertRejected(unrestricted.check(a, b));
+        assertRejected(unrestricted.check(b, a));
 
         Fixture angled = rectangle(70.0);
         assertRejected(angled.check(a, b));
@@ -161,18 +161,15 @@ class EdgeValidatorProximityClippingTest {
     }
 
     @Test
-    void corePointContactRetainsCurrentIntervalAndAngleDecision() throws Exception {
+    void corePointContactCannotCreateSpecialIntervalEvenWithoutAngleRule() throws Exception {
         Coordinate a = new Coordinate(-10, 10);
         Coordinate b = new Coordinate(10, -10);
         Fixture unrestricted = rectangle(null);
         Geometry coreContact = GeoUtil.segment(a, b).intersection(unrestricted.obstacle.core);
         assertFalse(coreContact.isEmpty());
         assertEquals(0, coreContact.getDimension());
-        double rootTwo = Math.sqrt(2);
-        assertIntervals(unrestricted.check(a, b), 20 * rootTwo,
-                new double[][]{{10 * rootTwo - 1, 10 * rootTwo + 1}});
-        assertIntervals(unrestricted.check(b, a), 20 * rootTwo,
-                new double[][]{{10 * rootTwo - 1, 10 * rootTwo + 1}});
+        assertRejected(unrestricted.check(a, b));
+        assertRejected(unrestricted.check(b, a));
 
         Fixture angled = rectangle(70.0);
         assertRejected(angled.check(a, b));
